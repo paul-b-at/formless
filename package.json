@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@google/genai": "^2.8.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@hugeicons/core-free-icons": "^4.2.0",
     "@hugeicons/react": "^1.1.6",
     "class-variance-authority": "^0.7.1",
