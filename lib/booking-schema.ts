@@ -6,7 +6,7 @@ export const Party = z.object({
   lastName: z.string(),
   business: z.boolean().default(false),
   email: z.string().email(),
-  phoneNumber: z.string().optional(),
+  phoneNumber: z.string().min(1),
   address: z.string().optional(),
   zipCode: z.string().optional(),
   city: z.string().optional(),

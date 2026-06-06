@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { ZodError } from "zod";
 
 import { AppointmentRequest } from "@/lib/booking-schema";
+import { sanitizeAppointmentPayload } from "@/lib/party-sanitize";
 import {
   priceRequest,
   submitRequest,
@@ -22,7 +23,9 @@ export async function POST(request: Request): Promise<NextResponse> {
       );
     }
 
-    const parsed = AppointmentRequest.parse(JSON.parse(payloadRaw));
+    const parsed = AppointmentRequest.parse(
+      sanitizeAppointmentPayload(JSON.parse(payloadRaw)),
+    );
 
     const files: { name: string; data: Blob }[] = [];
     for (const entry of formData.getAll("files")) {

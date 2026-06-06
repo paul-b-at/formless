@@ -6,7 +6,13 @@
  */
 
 import type { AppointmentRequest } from "../lib/booking-schema";
-import { advance, type EngineState } from "../lib/engine";
+import {
+  advance,
+  getEngineGeminiCallCount,
+  resetEngineGeminiCallCount,
+  type EngineState,
+  type EngineStep,
+} from "../lib/engine";
 import { parseBookingForm } from "../lib/form-interpreter";
 import { getBookingForm, priceRequest, sumNetToEuros } from "../lib/notarity-api";
 
@@ -117,7 +123,74 @@ function deepEqualPayload(
   return diffs;
 }
 
+type ScriptedAnswer =
+  | { kind: "text"; value: string }
+  | { kind: "form"; value: Record<string, unknown> };
+
+const answerQueues: Record<string, ScriptedAnswer[]> = {
+  destinationCountry: [{ kind: "text", value: "Spain (ES)" }],
+  products: [
+    { kind: "text", value: "NIE number application" },
+    { kind: "text", value: "nie-application-demo-joshua_timms.pdf" },
+    { kind: "text", value: "nie_personal_details.pdf" },
+  ],
+  participants: [{ kind: "text", value: "joshua.timms@notarity.com" }],
+  timeslots: [],
+  billingDetails: [{ kind: "form", value: JOSHUA_BILLING }],
+  contactDetails: [{ kind: "text", value: "Same as billing" }],
+  hardCopy: [{ kind: "text", value: "Yes, send a hard copy" }],
+  shippingDetails: [
+    { kind: "text", value: "Different shipping address" },
+    { kind: "form", value: JOSHUA_SHIPPING },
+  ],
+};
+
+function nextScriptedAnswer(
+  step: EngineStep,
+  state: EngineState,
+): { userMessage: string; structuredAnswer?: Record<string, unknown> } {
+  if (step.type === "form") {
+    const queue = answerQueues[step.accessor];
+    const next = queue?.shift();
+    if (!next || next.kind !== "form") {
+      throw new Error(`No form answer for accessor: ${step.accessor}`);
+    }
+    return { userMessage: "", structuredAnswer: next.value };
+  }
+
+  if (step.type === "fileUpload") {
+    const queue = answerQueues.products;
+    const next = queue?.shift();
+    if (!next || next.kind !== "text") {
+      throw new Error(`No scripted file upload for product: ${step.productId}`);
+    }
+    return { userMessage: next.value };
+  }
+
+  if (step.type !== "ask") {
+    throw new Error(`Expected ask or fileUpload step, got ${step.type}`);
+  }
+
+  const accessor = step.accessor;
+  if (accessor === "timeslots") {
+    const slotId = state.availableTimeslots?.[0]?.id;
+    if (!slotId) {
+      throw new Error("No available timeslots returned from API");
+    }
+    return { userMessage: slotId };
+  }
+
+  const queue = answerQueues[accessor];
+  const next = queue?.shift();
+  if (!next || next.kind !== "text") {
+    throw new Error(`No scripted answer for accessor: ${accessor}`);
+  }
+  return { userMessage: next.value };
+}
+
 async function main(): Promise<void> {
+  resetEngineGeminiCallCount();
+
   console.log("Engine replay: Joshua/Spain flow…\n");
 
   const rawForm = await getBookingForm("start-vienna-hackathon");
@@ -129,27 +202,18 @@ async function main(): Promise<void> {
     messages: [],
   };
 
-  const answerQueues: Record<string, string[]> = {
-    destinationCountry: ["ES"],
-    products: [
-      "NIE number application",
-      "nie-application-demo-joshua_timms.pdf",
-      "nie_personal_details.pdf",
-    ],
-    participants: ["joshua.timms@notarity.com"],
-    timeslots: [],
-    billingDetails: [JSON.stringify(JOSHUA_BILLING)],
-    contactDetails: ["same as billing"],
-    hardCopy: ["yes hard copy please"],
-    shippingDetails: [JSON.stringify(JOSHUA_SHIPPING)],
-  };
-
   let userMessage = "";
+  let structuredAnswer: Record<string, unknown> | undefined;
   const maxTurns = 30;
 
   for (let turn = 0; turn < maxTurns; turn++) {
-    const { state: nextState, step: result } = await advance(state, userMessage);
+    const { state: nextState, step: result } = await advance(
+      state,
+      userMessage,
+      structuredAnswer,
+    );
     state = nextState;
+    structuredAnswer = undefined;
 
     if (result.type === "complete") {
       const payload = result.payload;
@@ -177,32 +241,44 @@ async function main(): Promise<void> {
         process.exit(1);
       }
 
+      if (payload.confirmedPrice !== 580) {
+        console.error(
+          `Expected confirmedPrice €580, got €${payload.confirmedPrice}`,
+        );
+        process.exit(1);
+      }
+
       console.log("\nEngine replay passed.");
+      console.log(`Gemini API calls this run: ${getEngineGeminiCallCount()}`);
       return;
     }
 
-    console.log(`ASK [${result.accessor}]: ${result.question}`);
+    const label =
+      result.type === "form"
+        ? `FORM [${result.accessor}]: ${result.title}`
+        : result.type === "fileUpload"
+          ? `UPLOAD [${result.productId}] ${result.productLabel}: ${result.question}`
+          : `ASK [${result.accessor}]: ${result.question}`;
+    console.log(label);
     if (result.euroTotal !== undefined) {
       console.log(`  (running price: €${result.euroTotal})`);
     }
-
-    const accessor = result.accessor;
-    if (accessor === "timeslots") {
-      const slotId = nextState.availableTimeslots?.[0]?.id;
-      if (!slotId) {
-        throw new Error("No available timeslots returned from API");
-      }
-      userMessage = slotId;
-    } else {
-      const queue = answerQueues[accessor];
-      const next = queue?.shift();
-      if (!next) {
-        throw new Error(`No scripted answer for accessor: ${accessor}`);
-      }
-      userMessage = next;
+    if (result.type === "ask" && result.options?.length) {
+      console.log(
+        `  options: ${result.options.map((option) => option.label).join(" | ")}`,
+      );
     }
 
-    console.log(`ANSWER: ${userMessage}\n`);
+    const scripted = nextScriptedAnswer(result, state);
+    userMessage = scripted.userMessage;
+    structuredAnswer = scripted.structuredAnswer;
+
+    console.log(
+      scripted.structuredAnswer
+        ? `ANSWER: [form] ${JSON.stringify(scripted.structuredAnswer)}`
+        : `ANSWER: ${userMessage}`,
+    );
+    console.log();
   }
 
   console.error("Exceeded max turns without completing");

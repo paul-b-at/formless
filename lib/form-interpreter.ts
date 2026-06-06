@@ -178,7 +178,7 @@ export function getAccessor(component: Component): string | null {
   return null;
 }
 
-function isInputComponent(component: Component): boolean {
+export function isInputComponent(component: Component): boolean {
   if (component.hidden) {
     return false;
   }
@@ -342,6 +342,213 @@ function getProductDef(
   return catalog.find((p) => p.id === id);
 }
 
+export function isUploadFileName(value: string): boolean {
+  return /\.(pdf|png|jpe?g|webp)$/i.test(value.trim());
+}
+
+/** Products in collected that still need an uploaded file. */
+export function getProductsNeedingFiles(
+  collected: Collected,
+  catalog: ProductDefinition[],
+): ProductSelection[] {
+  return (collected.products ?? []).filter((product) => {
+    const def = getProductDef(product.id, catalog);
+    return Boolean(def?.fileUploadRequired && product.files.length === 0);
+  });
+}
+
+export function productDisplayName(
+  def: ProductDefinition | undefined,
+  productId: string,
+): string {
+  const title = def?.title.en?.trim();
+  if (title && title !== "Auto-added product") {
+    return title;
+  }
+  if (productId === "xK5IkgPX1LTYdWLFzW8X") {
+    return "NIE Personal Data";
+  }
+  return title || productId;
+}
+
+/** Resolve which product should receive an uploaded filename (scripted/replay only). */
+export function resolveFileUploadProductId(
+  fileName: string,
+  collected: Collected,
+  catalog: ProductDefinition[],
+  targetProductId?: string,
+): string | undefined {
+  const needing = getProductsNeedingFiles(collected, catalog);
+  if (needing.length === 0) {
+    return undefined;
+  }
+
+  if (
+    targetProductId &&
+    needing.some((product) => product.id === targetProductId)
+  ) {
+    return targetProductId;
+  }
+
+  if (needing.length === 1) {
+    return needing[0]!.id;
+  }
+
+  const normalized = fileName.trim();
+
+  if (/personal/i.test(normalized)) {
+    const match = needing.find((product) =>
+      productDisplayName(getProductDef(product.id, catalog), product.id)
+        .toLowerCase()
+        .includes("personal"),
+    );
+    if (match) {
+      return match.id;
+    }
+  }
+
+  if (/application/i.test(normalized)) {
+    const match = needing.find((product) => {
+      const label = productDisplayName(
+        getProductDef(product.id, catalog),
+        product.id,
+      ).toLowerCase();
+      return label.includes("application") || label.includes("nie number");
+    });
+    if (match) {
+      return match.id;
+    }
+  }
+
+  return undefined;
+}
+
+/** Reject reusing a file that already belongs to a different product. */
+export function validateFileForProductUpload(args: {
+  fileName: string;
+  targetProductId: string;
+  collected: Collected;
+  catalog: ProductDefinition[];
+  sessionFileOwners: Record<string, string>;
+}): { ok: true } | { ok: false; message: string } {
+  const normalized = args.fileName.trim();
+  const targetDef = getProductDef(args.targetProductId, args.catalog);
+  const targetName = productDisplayName(targetDef, args.targetProductId);
+
+  const ownerFromSession = args.sessionFileOwners[normalized];
+  if (ownerFromSession && ownerFromSession !== args.targetProductId) {
+    const ownerDef = getProductDef(ownerFromSession, args.catalog);
+    const ownerName = productDisplayName(ownerDef, ownerFromSession);
+    return {
+      ok: false,
+      message: `That file is already attached to ${ownerName} — upload the ${targetName} document.`,
+    };
+  }
+
+  for (const product of args.collected.products ?? []) {
+    if (
+      product.id !== args.targetProductId &&
+      product.files.includes(normalized)
+    ) {
+      const ownerDef = getProductDef(product.id, args.catalog);
+      const ownerName = productDisplayName(ownerDef, product.id);
+      return {
+        ok: false,
+        message: `That file is already attached to ${ownerName} — upload the ${targetName} document.`,
+      };
+    }
+  }
+
+  return { ok: true };
+}
+
+export function attachFileToProduct(
+  collected: Collected,
+  productId: string,
+  fileName: string,
+  catalog: ProductDefinition[],
+): Collected {
+  const products = [...(collected.products ?? [])];
+  const index = products.findIndex((product) => product.id === productId);
+  if (index === -1) {
+    return collected;
+  }
+
+  const normalized = fileName.trim();
+  if (!normalized) {
+    return collected;
+  }
+
+  const existing = products[index]!;
+  if (existing.files.includes(normalized)) {
+    return collected;
+  }
+
+  const def = getProductDef(productId, catalog);
+  products[index] = {
+    ...existing,
+    files: [...existing.files, normalized],
+    apostille: def?.apostilleRequired ? true : existing.apostille,
+  };
+
+  return { ...collected, products };
+}
+
+/**
+ * Attach session files only to the product that owns each file.
+ * Never cross-assign one product's document to a different product.
+ */
+export function autoAttachSessionFiles(
+  form: BookingFormSchema,
+  collected: Collected,
+  catalog: ProductDefinition[],
+  sessionFiles: string[],
+  sessionFileOwners: Record<string, string> = {},
+): Collected {
+  if (sessionFiles.length === 0) {
+    return collected;
+  }
+
+  let next = collected;
+  const attached = new Set(
+    (collected.products ?? []).flatMap((product) => product.files),
+  );
+
+  for (const fileName of sessionFiles) {
+    const ownerId = sessionFileOwners[fileName];
+    if (!ownerId || attached.has(fileName)) {
+      continue;
+    }
+
+    const needing = getProductsNeedingFiles(next, catalog);
+    if (!needing.some((product) => product.id === ownerId)) {
+      continue;
+    }
+
+    next = attachFileToProduct(next, ownerId, fileName, catalog);
+    attached.add(fileName);
+  }
+
+  return applyAutoAddRules(form, next);
+}
+
+export function findNewlyAttachedFile(
+  before: Collected,
+  after: Collected,
+): string | undefined {
+  const beforeFiles = new Set(
+    (before.products ?? []).flatMap((product) => product.files),
+  );
+  for (const product of after.products ?? []) {
+    for (const file of product.files) {
+      if (!beforeFiles.has(file)) {
+        return file;
+      }
+    }
+  }
+  return undefined;
+}
+
 function isPartyFilled(party: unknown): boolean {
   if (!party || typeof party !== "object") {
     return false;
@@ -353,7 +560,9 @@ function isPartyFilled(party: unknown): boolean {
     typeof p.lastName === "string" &&
     p.lastName.length > 0 &&
     typeof p.email === "string" &&
-    p.email.length > 0
+    p.email.length > 0 &&
+    typeof p.phoneNumber === "string" &&
+    p.phoneNumber.trim().length > 0
   );
 }
 
@@ -437,7 +646,14 @@ function isComponentFilled(
       if (!collected.hardCopy?.hardCopy) {
         return true;
       }
-      return isPartyFilled(collected.shippingDetails);
+      const shipping = collected.shippingDetails;
+      if (!shipping) {
+        return false;
+      }
+      if (shipping.shippingDetailsSameAsBillingDetails) {
+        return isPartyFilled(collected.billingDetails);
+      }
+      return isPartyFilled(shipping);
     }
     case "newsletter":
       return collected.newsletter !== undefined;
@@ -535,6 +751,7 @@ export function applyAnswer(
   component: Component,
   value: unknown,
   catalog: ProductDefinition[] = [],
+  targetProductId?: string,
 ): Collected {
   const accessor = getAccessor(component);
   if (!accessor) {
@@ -556,17 +773,41 @@ export function applyAnswer(
         const existing = products.find((p) => p.id === raw.id);
         const def = getProductDef(raw.id, catalog);
         const base = existing ?? defaultProductSelection(raw.id, def);
+        const mergedFiles =
+          raw.files && raw.files.length > 0
+            ? [...new Set([...base.files, ...raw.files])]
+            : base.files;
         next.products = mergeProduct(products, {
           ...base,
           ...raw,
-          files: raw.files ?? base.files,
+          files: mergedFiles,
         });
       } else if (typeof value === "string") {
-        const def = getProductDef(value, catalog);
-        next.products = mergeProduct(
-          products,
-          defaultProductSelection(value, def),
-        );
+        const trimmed = value.trim();
+        if (isUploadFileName(trimmed)) {
+          const productId = resolveFileUploadProductId(
+            trimmed,
+            { ...next, products },
+            catalog,
+            targetProductId,
+          );
+          if (productId) {
+            next = attachFileToProduct(next, productId, trimmed, catalog);
+            break;
+          }
+        }
+        const catalogMatch =
+          catalog.find((product) => product.id === trimmed) ??
+          catalog.find(
+            (product) =>
+              product.title.en?.toLowerCase() === trimmed.toLowerCase(),
+          );
+        if (catalogMatch) {
+          next.products = mergeProduct(
+            products,
+            defaultProductSelection(catalogMatch.id, catalogMatch),
+          );
+        }
       }
       break;
     }
@@ -605,6 +846,73 @@ export function getTimeslotLabel(
   const visible = visibleComponents(form, collected);
   const slot = visible.find((c) => c.type === "timeSlots");
   return slot?.props?.timeslotLabel ?? null;
+}
+
+export type CountryOption = { code: string; label: string };
+
+/** Countries referenced by destinationCountry conditions in the live form schema. */
+export function getCountryOptions(form: BookingFormSchema): CountryOption[] {
+  const codes = new Set<string>();
+
+  function walkObject(obj: unknown): void {
+    if (!obj || typeof obj !== "object") {
+      return;
+    }
+    const record = obj as Record<string, unknown>;
+    if (
+      record.compare === "destinationCountry" &&
+      typeof record.value === "string"
+    ) {
+      try {
+        const parsed = JSON.parse(record.value) as unknown;
+        if (Array.isArray(parsed)) {
+          for (const entry of parsed) {
+            codes.add(String(entry));
+          }
+        } else {
+          codes.add(record.value);
+        }
+      } catch {
+        codes.add(record.value);
+      }
+    }
+    for (const value of Object.values(record)) {
+      if (Array.isArray(value)) {
+        for (const item of value) {
+          walkObject(item);
+        }
+      } else {
+        walkObject(value);
+      }
+    }
+  }
+
+  walkObject(form);
+
+  for (const page of form.pages) {
+    for (const component of page.components) {
+      if (component.type !== "countryPicker" || !component.options) {
+        continue;
+      }
+      for (const option of component.options) {
+        if (typeof option === "string" && option.length === 2) {
+          codes.add(option);
+        } else if (typeof option === "object" && option !== null) {
+          const entry = option as { code?: string; value?: string };
+          if (entry.code) {
+            codes.add(entry.code);
+          } else if (entry.value?.length === 2) {
+            codes.add(entry.value);
+          }
+        }
+      }
+    }
+  }
+
+  const display = new Intl.DisplayNames("en", { type: "region" });
+  return [...codes]
+    .sort()
+    .map((code) => ({ code, label: display.of(code) ?? code }));
 }
 
 export function getVisibleProductPickerTags(

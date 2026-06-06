@@ -35,10 +35,17 @@ const ChatRequestSchema = z.object({
           }),
         )
         .optional(),
+      sessionFiles: z.array(z.string()).optional(),
+      sessionFileOwners: z.record(z.string()).optional(),
     })
     .nullable()
     .optional(),
   userMessage: z.string().default(""),
+  structuredAnswer: z.record(z.unknown()).optional(),
+  sessionFiles: z.array(z.string()).optional(),
+  sessionFileOwners: z.record(z.string()).optional(),
+  uploadProductId: z.string().optional(),
+  uploadKind: z.enum(["file"]).optional(),
 });
 
 async function bootstrapState(): Promise<EngineState> {
@@ -65,6 +72,8 @@ function restoreState(
     productCatalog: input.productCatalog as EngineState["productCatalog"],
     availableTimeslots:
       input.availableTimeslots as EngineState["availableTimeslots"],
+    sessionFiles: input.sessionFiles as EngineState["sessionFiles"],
+    sessionFileOwners: input.sessionFileOwners as EngineState["sessionFileOwners"],
   };
 }
 
@@ -74,7 +83,18 @@ export async function POST(request: Request): Promise<NextResponse> {
     const engineState =
       restoreState(body.state) ?? (await bootstrapState());
 
-    const { state, step } = await advance(engineState, body.userMessage);
+    const sessionFiles =
+      body.sessionFiles ?? engineState.sessionFiles ?? [];
+    const sessionFileOwners =
+      body.sessionFileOwners ?? engineState.sessionFileOwners ?? {};
+
+    const { state, step } = await advance(
+      { ...engineState, sessionFiles, sessionFileOwners },
+      body.userMessage,
+      body.structuredAnswer,
+      body.uploadProductId,
+      body.uploadKind,
+    );
 
     return NextResponse.json({ step, state });
   } catch (error) {
