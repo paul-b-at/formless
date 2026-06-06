@@ -1,0 +1,651 @@
+import { z } from "zod";
+
+import type { AppointmentRequest, ProductSelection } from "./booking-schema";
+
+// --- Schema types (from GET /booking-form/slug) ---
+
+export const LocalizedTextSchema = z.record(z.string());
+export type LocalizedText = z.infer<typeof LocalizedTextSchema>;
+
+const ConditionOperatorSchema = z.enum([
+  "ISDEFINED",
+  "INCLUDES",
+  "EQUAL",
+  "INTERSECTS",
+  "ISTRUE",
+  "AND",
+  "OR",
+  "NOT",
+]);
+
+export type ConditionOperator = z.infer<typeof ConditionOperatorSchema>;
+
+export const ConditionExprSchema: z.ZodType<ConditionExpr> = z.lazy(() =>
+  z.union([
+    z.object({
+      condition: z.enum([
+        "ISDEFINED",
+        "INCLUDES",
+        "EQUAL",
+        "INTERSECTS",
+        "ISTRUE",
+      ]),
+      compare: z.string(),
+      value: z.string().optional(),
+    }),
+    z.object({
+      condition: z.enum(["AND", "OR", "NOT"]),
+      conditions: z.array(ConditionExprSchema).min(1),
+    }),
+  ]),
+);
+
+export type LeafCondition = {
+  condition: "ISDEFINED" | "INCLUDES" | "EQUAL" | "INTERSECTS" | "ISTRUE";
+  compare: string;
+  value?: string;
+};
+
+export type ConditionExpr =
+  | LeafCondition
+  | {
+      condition: "AND" | "OR" | "NOT";
+      conditions: ConditionExpr[];
+    };
+
+function isLeafCondition(condition: ConditionExpr): condition is LeafCondition {
+  return (
+    condition.condition !== "AND" &&
+    condition.condition !== "OR" &&
+    condition.condition !== "NOT"
+  );
+}
+
+export const ComponentSchema: z.ZodType<Component> = z.lazy(() =>
+  z.object({
+    id: z.string(),
+    type: z.string(),
+    hidden: z.boolean().optional(),
+    accessor: z.string().optional(),
+    label: LocalizedTextSchema.optional(),
+    options: z.array(z.unknown()).optional(),
+    defaultValue: z.string().optional(),
+    props: z
+      .object({
+        condition: ConditionOperatorSchema.optional(),
+        compare: z.string().optional(),
+        value: z.string().optional(),
+        components: z.array(ComponentSchema).optional(),
+        elseComponents: z.array(ComponentSchema).optional(),
+        tags: z.array(z.string()).optional(),
+        timeslotLabel: z.string().optional(),
+        _product: z.string().optional(),
+        hideHardCopy: z.boolean().optional(),
+        hideExpressShipping: z.boolean().optional(),
+        hidePricingOverview: z.boolean().optional(),
+        hideBillingDetails: z.boolean().optional(),
+      })
+      .passthrough()
+      .optional(),
+  }),
+);
+
+export type Component = {
+  id: string;
+  type: string;
+  hidden?: boolean;
+  accessor?: string;
+  label?: LocalizedText;
+  options?: unknown[];
+  defaultValue?: string;
+  props?: {
+    condition?: ConditionOperator;
+    compare?: string;
+    value?: string;
+    components?: Component[];
+    elseComponents?: Component[];
+    tags?: string[];
+    timeslotLabel?: string;
+    _product?: string;
+    hideHardCopy?: boolean;
+    hideExpressShipping?: boolean;
+    hidePricingOverview?: boolean;
+    hideBillingDetails?: boolean;
+    [key: string]: unknown;
+  };
+};
+
+export const PageSchema = z.object({
+  title: LocalizedTextSchema.optional(),
+  slug: z.string().optional(),
+  components: z.array(ComponentSchema),
+});
+
+export type Page = z.infer<typeof PageSchema>;
+
+export const BookingFormSchemaSchema = z
+  .object({
+    id: z.string(),
+    slug: z.string().optional(),
+    _company: z.string().optional(),
+    pages: z.array(PageSchema),
+    options: z.record(z.unknown()).optional(),
+  })
+  .passthrough();
+
+export type BookingFormSchema = z.infer<typeof BookingFormSchemaSchema>;
+
+export type ProductDefinition = {
+  id: string;
+  title: Record<string, string>;
+  apostilleRequired?: boolean;
+  showApostille?: boolean;
+  fileUploadRequired?: boolean;
+  showFileUpload?: boolean;
+};
+
+export type Collected = Partial<AppointmentRequest>;
+
+const SKIP_TYPES = new Set([
+  "condition",
+  "summary",
+  "confirmTC",
+  "singleProduct",
+]);
+
+const INPUT_TYPES = new Set([
+  "countryPicker",
+  "productPicker",
+  "participants",
+  "timeSlots",
+  "billingDetails",
+  "contactDetails",
+  "hardCopy",
+  "shippingDetails",
+]);
+
+export function parseBookingForm(raw: unknown): BookingFormSchema {
+  return BookingFormSchemaSchema.parse(raw);
+}
+
+export function getAccessor(component: Component): string | null {
+  if (component.accessor) {
+    return component.accessor;
+  }
+  if (component.type === "shippingDetails") {
+    return "shippingDetails";
+  }
+  return null;
+}
+
+function isInputComponent(component: Component): boolean {
+  if (component.hidden) {
+    return false;
+  }
+  if (SKIP_TYPES.has(component.type)) {
+    return false;
+  }
+  if (INPUT_TYPES.has(component.type)) {
+    return true;
+  }
+  return getAccessor(component) !== null;
+}
+
+function getByPath(collected: Collected, path: string): unknown {
+  const parts = path.split(".");
+  let current: unknown = collected;
+
+  for (const part of parts) {
+    if (current === undefined || current === null) {
+      return undefined;
+    }
+    if (Array.isArray(current)) {
+      if (part === "id") {
+        return current
+          .map((item) =>
+            typeof item === "object" && item !== null && "id" in item
+              ? (item as { id: string }).id
+              : undefined,
+          )
+          .filter((id): id is string => typeof id === "string");
+      }
+      return undefined;
+    }
+    if (typeof current === "object") {
+      current = (current as Record<string, unknown>)[part];
+    } else {
+      return undefined;
+    }
+  }
+
+  return current;
+}
+
+function parseConditionValue(value: string | undefined): unknown {
+  if (value === undefined) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return value;
+  }
+}
+
+function asArray(value: unknown): unknown[] {
+  if (Array.isArray(value)) {
+    return value;
+  }
+  if (value === undefined || value === null) {
+    return [];
+  }
+  return [value];
+}
+
+function arraysIntersect(a: unknown[], b: unknown[]): boolean {
+  const setB = new Set(b.map(String));
+  return a.some((item) => setB.has(String(item)));
+}
+
+export function evaluateCondition(
+  condition: ConditionExpr | undefined,
+  collected: Collected,
+): boolean {
+  if (!condition) {
+    return true;
+  }
+
+  if (condition.condition === "AND" || condition.condition === "OR") {
+    const results = condition.conditions.map((child) =>
+      evaluateCondition(child, collected),
+    );
+    if (condition.condition === "AND") {
+      return results.every(Boolean);
+    }
+    return results.some(Boolean);
+  }
+
+  if (condition.condition === "NOT") {
+    return !condition.conditions.every((child) =>
+      evaluateCondition(child, collected),
+    );
+  }
+
+  if (!isLeafCondition(condition)) {
+    return false;
+  }
+
+  const actual = getByPath(collected, condition.compare);
+  const expected = parseConditionValue(condition.value);
+
+  switch (condition.condition) {
+    case "ISDEFINED":
+      return actual !== undefined && actual !== null && actual !== "";
+    case "INCLUDES": {
+      const haystack = asArray(expected);
+      return haystack.map(String).includes(String(actual));
+    }
+    case "EQUAL":
+      return String(actual) === String(expected);
+    case "INTERSECTS": {
+      const left = asArray(actual);
+      const right = asArray(expected);
+      return arraysIntersect(left, right);
+    }
+    case "ISTRUE":
+      return actual === true;
+    default:
+      return false;
+  }
+}
+
+function collectVisible(
+  components: Component[],
+  collected: Collected,
+  out: Component[],
+): void {
+  for (const component of components) {
+    if (component.hidden) {
+      continue;
+    }
+
+    if (component.type === "condition") {
+      const expr = component.props as ConditionExpr | undefined;
+      const branch = evaluateCondition(expr, collected)
+        ? (component.props?.components ?? [])
+        : (component.props?.elseComponents ?? []);
+      collectVisible(branch, collected, out);
+      continue;
+    }
+
+    if (isInputComponent(component)) {
+      out.push(component);
+    }
+  }
+}
+
+export function visibleComponents(
+  form: BookingFormSchema,
+  collected: Collected,
+): Component[] {
+  const visible: Component[] = [];
+  for (const page of form.pages) {
+    collectVisible(page.components, collected, visible);
+  }
+  return visible;
+}
+
+function getProductDef(
+  id: string,
+  catalog: ProductDefinition[],
+): ProductDefinition | undefined {
+  return catalog.find((p) => p.id === id);
+}
+
+function isPartyFilled(party: unknown): boolean {
+  if (!party || typeof party !== "object") {
+    return false;
+  }
+  const p = party as Record<string, unknown>;
+  return (
+    typeof p.firstName === "string" &&
+    p.firstName.length > 0 &&
+    typeof p.lastName === "string" &&
+    p.lastName.length > 0 &&
+    typeof p.email === "string" &&
+    p.email.length > 0
+  );
+}
+
+function isProductsFilled(
+  collected: Collected,
+  visible: Component[],
+  catalog: ProductDefinition[],
+): boolean {
+  const products = collected.products ?? [];
+  if (products.length === 0) {
+    return false;
+  }
+
+  for (const component of visible) {
+    if (component.type === "productPicker") {
+      const pickerIds = catalog.map((p) => p.id);
+      if (pickerIds.length === 0) {
+        continue;
+      }
+      const hasPickerProduct = products.some((p) => pickerIds.includes(p.id));
+      if (!hasPickerProduct) {
+        return false;
+      }
+    }
+  }
+
+  for (const product of products) {
+    const def = getProductDef(product.id, catalog);
+    if (!def) {
+      continue;
+    }
+    if (def.apostilleRequired && product.apostille !== true) {
+      return false;
+    }
+    if (def.fileUploadRequired && product.files.length === 0) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function isComponentFilled(
+  component: Component,
+  collected: Collected,
+  visible: Component[],
+  catalog: ProductDefinition[],
+): boolean {
+  const accessor = getAccessor(component);
+  if (!accessor) {
+    return true;
+  }
+
+  switch (accessor) {
+    case "destinationCountry":
+      return (
+        typeof collected.destinationCountry === "string" &&
+        collected.destinationCountry.length === 2
+      );
+    case "products":
+      return isProductsFilled(collected, visible, catalog);
+    case "participants":
+      return (collected.participants?.length ?? 0) > 0;
+    case "timeslots":
+      return (collected.timeslots?.length ?? 0) > 0;
+    case "billingDetails":
+      return isPartyFilled(collected.billingDetails);
+    case "contactDetails": {
+      const contact = collected.contactDetails;
+      if (contact?.contactDetailsSameAsBillingDetails) {
+        return isPartyFilled(collected.billingDetails);
+      }
+      return isPartyFilled(contact);
+    }
+    case "hardCopy":
+      return (
+        collected.hardCopy !== undefined &&
+        collected.hardCopy.hardCopy !== undefined
+      );
+    case "shippingDetails": {
+      if (!collected.hardCopy?.hardCopy) {
+        return true;
+      }
+      return isPartyFilled(collected.shippingDetails);
+    }
+    case "newsletter":
+      return collected.newsletter !== undefined;
+    default:
+      return getByPath(collected, accessor) !== undefined;
+  }
+}
+
+export function nextUnfilled(
+  form: BookingFormSchema,
+  collected: Collected,
+  catalog: ProductDefinition[] = [],
+): Component | null {
+  const visible = visibleComponents(form, collected);
+
+  for (const component of visible) {
+    if (!isComponentFilled(component, collected, visible, catalog)) {
+      return component;
+    }
+  }
+
+  return null;
+}
+
+function defaultProductSelection(
+  id: string,
+  def?: ProductDefinition,
+): ProductSelection {
+  return {
+    id,
+    apostille: def?.apostilleRequired ? true : null,
+    userInput: "",
+    documentsNotReadyYet: false,
+    needHelpDrafting: false,
+    proofOfRepresentation: null,
+    files: [],
+  };
+}
+
+function applyAutoAddRules(
+  form: BookingFormSchema,
+  collected: Collected,
+): Collected {
+  const next = { ...collected, products: [...(collected.products ?? [])] };
+  const visible = visibleComponents(form, next);
+
+  collectAutoAddProducts(form.pages.flatMap((p) => p.components), collected, next);
+  return next;
+}
+
+function collectAutoAddProducts(
+  components: Component[],
+  collected: Collected,
+  next: Collected,
+): void {
+  for (const component of components) {
+    if (component.type === "condition") {
+      const expr = component.props as ConditionExpr | undefined;
+      const branch = evaluateCondition(expr, collected)
+        ? (component.props?.components ?? [])
+        : (component.props?.elseComponents ?? []);
+      collectAutoAddProducts(branch, collected, next);
+      continue;
+    }
+
+    if (component.type === "singleProduct") {
+      const productId = component.props?._product;
+      if (productId && !next.products?.some((p) => p.id === productId)) {
+        next.products = [
+          ...(next.products ?? []),
+          defaultProductSelection(productId),
+        ];
+      }
+    }
+  }
+}
+
+function mergeProduct(
+  products: ProductSelection[],
+  update: ProductSelection,
+): ProductSelection[] {
+  const index = products.findIndex((p) => p.id === update.id);
+  if (index === -1) {
+    return [...products, update];
+  }
+  const merged = { ...products[index], ...update };
+  const copy = [...products];
+  copy[index] = merged;
+  return copy;
+}
+
+export function applyAnswer(
+  form: BookingFormSchema,
+  collected: Collected,
+  component: Component,
+  value: unknown,
+  catalog: ProductDefinition[] = [],
+): Collected {
+  const accessor = getAccessor(component);
+  if (!accessor) {
+    return collected;
+  }
+
+  let next: Collected = { ...collected };
+
+  switch (accessor) {
+    case "destinationCountry":
+      next.destinationCountry = String(value);
+      break;
+    case "products": {
+      const products = [...(next.products ?? [])];
+      if (Array.isArray(value)) {
+        next.products = value as ProductSelection[];
+      } else if (typeof value === "object" && value !== null) {
+        const raw = value as Partial<ProductSelection> & { id: string };
+        const existing = products.find((p) => p.id === raw.id);
+        const def = getProductDef(raw.id, catalog);
+        const base = existing ?? defaultProductSelection(raw.id, def);
+        next.products = mergeProduct(products, {
+          ...base,
+          ...raw,
+          files: raw.files ?? base.files,
+        });
+      } else if (typeof value === "string") {
+        const def = getProductDef(value, catalog);
+        next.products = mergeProduct(
+          products,
+          defaultProductSelection(value, def),
+        );
+      }
+      break;
+    }
+    case "participants":
+      next.participants = value as Collected["participants"];
+      break;
+    case "timeslots":
+      next.timeslots = Array.isArray(value) ? (value as string[]) : [String(value)];
+      break;
+    case "billingDetails":
+      next.billingDetails = value as Collected["billingDetails"];
+      break;
+    case "contactDetails":
+      next.contactDetails = value as Collected["contactDetails"];
+      break;
+    case "hardCopy":
+      next.hardCopy = value as Collected["hardCopy"];
+      break;
+    case "shippingDetails":
+      next.shippingDetails = value as Collected["shippingDetails"];
+      break;
+    case "newsletter":
+      next.newsletter = Boolean(value);
+      break;
+    default:
+      (next as Record<string, unknown>)[accessor] = value;
+  }
+
+  return applyAutoAddRules(form, next);
+}
+
+export function getTimeslotLabel(
+  form: BookingFormSchema,
+  collected: Collected,
+): string | null {
+  const visible = visibleComponents(form, collected);
+  const slot = visible.find((c) => c.type === "timeSlots");
+  return slot?.props?.timeslotLabel ?? null;
+}
+
+export function getVisibleProductPickerTags(
+  form: BookingFormSchema,
+  collected: Collected,
+): string[] {
+  const visible = visibleComponents(form, collected);
+  const tags: string[] = [];
+  for (const component of visible) {
+    if (component.type === "productPicker" && component.props?.tags) {
+      tags.push(...component.props.tags);
+    }
+  }
+  return [...new Set(tags)];
+}
+
+export function componentLabel(
+  component: Component,
+  language = "en",
+): string {
+  if (component.label?.[language]) {
+    return component.label[language];
+  }
+  switch (component.type) {
+    case "countryPicker":
+      return "destination country";
+    case "productPicker":
+      return "product selection";
+    case "participants":
+      return "participants";
+    case "timeSlots":
+      return "appointment time";
+    case "billingDetails":
+      return "billing details";
+    case "contactDetails":
+      return "contact details";
+    case "hardCopy":
+      return "hard copy delivery";
+    case "shippingDetails":
+      return "shipping details";
+    default:
+      return component.type;
+  }
+}
