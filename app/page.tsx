@@ -4,42 +4,94 @@ import { useState } from "react";
 
 import { Chat, type CompleteBooking } from "@/components/Chat";
 import { Summary } from "@/components/Summary";
+import { Badge } from "@/components/ui/badge";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import type { EngineState, EngineStep } from "@/lib/engine";
 
 export default function Home() {
   const [booking, setBooking] = useState<CompleteBooking | null>(null);
+  const [chatResume, setChatResume] = useState<{
+    state: EngineState;
+    step: EngineStep;
+  } | null>(null);
 
   return (
-    <main className="min-h-screen bg-gradient-to-b from-slate-50 to-slate-100">
-      <div className="mx-auto flex min-h-screen max-w-5xl flex-col px-4 py-8 sm:px-6 lg:px-8">
-        <header className="mb-8 text-center sm:text-left">
-          <p className="text-sm font-medium uppercase tracking-widest text-slate-500">
-            Notarity hackathon
-          </p>
-          <h1 className="mt-2 text-3xl font-bold tracking-tight text-slate-900 sm:text-4xl">
-            Formless
-          </h1>
-          <p className="mt-2 max-w-2xl text-slate-600">
-            AI booking assistant — answer a few questions and we&apos;ll assemble
-            a valid appointment request, priced server-side.
-          </p>
-        </header>
+    <div className="flex h-dvh flex-col bg-background">
+      <header className="shrink-0 border-b border-border bg-card/50 px-4 py-4 backdrop-blur-sm sm:px-6">
+        <div className="mx-auto flex max-w-7xl items-center gap-3">
+          <div
+            aria-hidden
+            className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary text-lg text-primary-foreground"
+          >
+            ✦
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="font-heading text-xl font-semibold tracking-tight text-foreground sm:text-2xl">
+                Formless
+              </h1>
+              <Badge variant="secondary" className="hidden sm:inline-flex">
+                Notarity · START Vienna &apos;26
+              </Badge>
+            </div>
+            <p className="truncate text-sm text-muted-foreground">
+              Book a notarisation in minutes — just answer a few questions.
+            </p>
+          </div>
+        </div>
+      </header>
 
-        <div className="grid flex-1 gap-6 lg:grid-cols-2">
-          <Chat onComplete={setBooking} />
-          {booking && (
-            <Summary
-              payload={booking.payload}
-              lineItems={booking.lineItems}
-              confirmedPrice={booking.confirmedPrice}
-              files={booking.files}
-            />
-          )}
+      <main className="mx-auto flex min-h-0 w-full max-w-7xl flex-1 flex-col gap-4 p-4 sm:p-6 lg:flex-row lg:gap-6">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col lg:max-h-full lg:flex-[1.1]">
+          <Chat
+            onComplete={setBooking}
+            resumeFrom={chatResume}
+            onResumeHandled={() => setChatResume(null)}
+          />
         </div>
 
-        <footer className="mt-8 text-center text-xs text-slate-400">
-          Debug mode · staging only · no production submit
-        </footer>
-      </div>
-    </main>
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col lg:max-h-full">
+          {booking ? (
+            <Summary
+              booking={booking}
+              onBookingUpdate={setBooking}
+              onReask={(resume) => {
+                setBooking(null);
+                setChatResume(resume);
+              }}
+            />
+          ) : (
+            <Card className="flex h-full min-h-[12rem] flex-col border-dashed lg:min-h-0">
+              <CardHeader>
+                <CardTitle>Summary</CardTitle>
+                <CardDescription>
+                  Your price breakdown and booking review will appear here once
+                  the conversation is complete.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="flex flex-1 flex-col items-center justify-center gap-2 text-center text-muted-foreground">
+                <span className="text-3xl opacity-40" aria-hidden>
+                  📋
+                </span>
+                <p className="max-w-xs text-sm">
+                  Complete the chat on the left to see line items and submit in
+                  debug mode.
+                </p>
+              </CardContent>
+            </Card>
+          )}
+        </div>
+      </main>
+
+      <footer className="shrink-0 border-t border-border px-4 py-2 text-center text-xs text-muted-foreground">
+        Debug mode · staging only · draft id reused for safe testing
+      </footer>
+    </div>
   );
 }

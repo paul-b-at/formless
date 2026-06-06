@@ -49,7 +49,7 @@ A notarity booking assistant: a client arrives with a document and no idea what 
 ## 3 · Stack & conventions
 
 - **Bun + TypeScript**, **Next.js (App Router)**
-- **UI:** React + Tailwind — dumb / presentational components
+- **UI:** React + Tailwind + **shadcn/ui** — dumb / presentational components. Init with our preset: `bunx shadcn@latest init --preset b7Br6ypjn` (sets the theme + base components). Build with shadcn primitives and its theme tokens; don't hand-roll what shadcn already provides.
 - **Validation:** zod (mirrors the real payload)
 - **Form interpreter:** walks the schema's `pages[] → components[] → condition` tree and drives the conversation
 - **LLM:** **Google Gemini** via `@google/genai` (model e.g. `gemini-2.0-flash`), using structured output (`responseMimeType: "application/json"` + a `responseSchema`); engine in `lib/engine.ts`. Bonus: Gemini is **multimodal** — feed the PDF straight in for the doc step, so you may not need a separate OCR lib at all.
@@ -170,6 +170,7 @@ type EngineState = {
 
 type EngineStep =
   | { type: "ask"; accessor: string; question: string; options?: string[] }
+  | { type: "form"; accessor: string; title: string; fields: { name: string; label: string; type: "text" | "email" | "tel"; required?: boolean }[] }  // grouped party input (billing/shipping/contact) -> UI renders a small form and returns a structured object, NEVER a pasted JSON string
   | { type: "complete"; payload: AppointmentRequest }
 
 // Rules:
@@ -180,6 +181,11 @@ type EngineStep =
 // - Mirror auto-add rules (picking NIE application auto-adds NIE Personal Data).
 // - Apply smart defaults; confirm rather than interrogate.
 // - Call POST /price whenever the selection changes to show a live breakdown.
+// - For choice components (countryPicker, productPicker, timeslot) ALWAYS
+//   populate `options` on the FIRST ask — never make the user type a choice
+//   or discover the options only after a failed parse.
+// - For party/group accessors (billingDetails, shippingDetails, contactDetails)
+//   emit a { type: "form" } step so the user fills labelled fields, not raw JSON.
 // - When the payload passes zod, return { type: "complete" }.
 ```
 
@@ -190,8 +196,10 @@ type EngineStep =
 3. Build `lib/form-interpreter.ts`: parse the schema, evaluate conditions, expose "next visible unfilled component".
 4. Build `engine.ts` (text only) → reproduce the Joshua payload end-to-end via conversation.
 5. **Chat UI** → wire engine → `/api/book` (price + submit). Show the price breakdown in `Summary`.
-6. **OCR** (infer country/product from the doc), then **ElevenLabs voice** on the same engine.
-7. Other personas: **Robert** (Power of Attorney → `proofOfRepresentation` + multi-participant) and **Elizabeth** (Austrian FlexCo → `destinationCountry: "AT"`, AT timeslot label, business billing).
+6. **Polish the UI** so it fits and looks demo-ready (no new features, no engine changes).
+7. **OCR** (infer country/product from the doc) on the same engine.
+8. Other personas: **Robert** (Power of Attorney → `proofOfRepresentation` + multi-participant) and **Elizabeth** (Austrian FlexCo → `destinationCountry: "AT"`, AT timeslot label, business billing).
+9. **ElevenLabs voice** — LAST, optional flourish (skip if the clock is tight) — on the same engine.
 
 ## 8 · Human-review zone (don't fully trust the AI here)
 

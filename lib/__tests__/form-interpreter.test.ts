@@ -2,9 +2,12 @@ import { describe, expect, test } from "bun:test";
 
 import {
   applyAnswer,
+  autoAttachSessionFiles,
   evaluateCondition,
   nextUnfilled,
   parseBookingForm,
+  resolveFileUploadProductId,
+  validateFileForProductUpload,
   visibleComponents,
 } from "../form-interpreter";
 import type { BookingFormSchema, ProductDefinition } from "../form-interpreter";
@@ -259,6 +262,220 @@ describe("nextUnfilled", () => {
     const visible = visibleComponents(fixtureForm, collected);
     const slot = visible.find((c) => c.type === "timeSlots");
     expect(slot?.props?.timeslotLabel).toBe("29sfIoZ9WgFQl8XjbKPu");
+  });
+
+  test("applyAnswer attaches pdf filename to first product needing file", () => {
+    let collected = applyAnswer(
+      fixtureForm,
+      {
+        destinationCountry: "ES",
+        products: [
+          {
+            id: "UpEJ7raQEKQKFhWn12r2",
+            apostille: true,
+            userInput: "",
+            documentsNotReadyYet: false,
+            needHelpDrafting: false,
+            proofOfRepresentation: null,
+            files: [],
+          },
+          {
+            id: "xK5IkgPX1LTYdWLFzW8X",
+            apostille: null,
+            userInput: "",
+            documentsNotReadyYet: false,
+            needHelpDrafting: false,
+            proofOfRepresentation: null,
+            files: [],
+          },
+        ],
+      },
+      { type: "productPicker", id: "pp", accessor: "products" },
+      "nie-application-demo-joshua_timms.pdf",
+      spainCatalog,
+    );
+
+    const nieApp = collected.products?.find(
+      (product) => product.id === "UpEJ7raQEKQKFhWn12r2",
+    );
+    const nieData = collected.products?.find(
+      (product) => product.id === "xK5IkgPX1LTYdWLFzW8X",
+    );
+
+    expect(nieApp?.files).toEqual(["nie-application-demo-joshua_timms.pdf"]);
+    expect(nieData?.files).toEqual([]);
+  });
+
+  test("applyAnswer attaches second pdf to next product needing file", () => {
+    const collected = applyAnswer(
+      fixtureForm,
+      {
+        destinationCountry: "ES",
+        products: [
+          {
+            id: "UpEJ7raQEKQKFhWn12r2",
+            apostille: true,
+            userInput: "",
+            documentsNotReadyYet: false,
+            needHelpDrafting: false,
+            proofOfRepresentation: null,
+            files: ["nie-application-demo-joshua_timms.pdf"],
+          },
+          {
+            id: "xK5IkgPX1LTYdWLFzW8X",
+            apostille: null,
+            userInput: "",
+            documentsNotReadyYet: false,
+            needHelpDrafting: false,
+            proofOfRepresentation: null,
+            files: [],
+          },
+        ],
+      },
+      { type: "productPicker", id: "pp", accessor: "products" },
+      "nie_personal_details.pdf",
+      spainCatalog,
+    );
+
+    const nieData = collected.products?.find(
+      (product) => product.id === "xK5IkgPX1LTYdWLFzW8X",
+    );
+    expect(nieData?.files).toEqual(["nie_personal_details.pdf"]);
+  });
+
+  test("autoAttachSessionFiles reuses earlier upload for NIE application", () => {
+    let collected = applyAnswer(
+      fixtureForm,
+      { destinationCountry: "ES" },
+      { type: "productPicker", id: "pp", accessor: "products" },
+      "UpEJ7raQEKQKFhWn12r2",
+      spainCatalog,
+    );
+
+    collected = autoAttachSessionFiles(
+      fixtureForm,
+      collected,
+      spainCatalog,
+      ["nie-application-demo-joshua_timms.pdf"],
+      {
+        "nie-application-demo-joshua_timms.pdf": "UpEJ7raQEKQKFhWn12r2",
+      },
+    );
+
+    const nieApp = collected.products?.find(
+      (product) => product.id === "UpEJ7raQEKQKFhWn12r2",
+    );
+    expect(nieApp?.files).toEqual(["nie-application-demo-joshua_timms.pdf"]);
+  });
+
+  test("resolveFileUploadProductId does not assign application pdf to personal data when both need files", () => {
+    const collected = {
+      destinationCountry: "ES",
+      products: [
+        {
+          id: "UpEJ7raQEKQKFhWn12r2",
+          apostille: true,
+          userInput: "",
+          documentsNotReadyYet: false,
+          needHelpDrafting: false,
+          proofOfRepresentation: null,
+          files: [],
+        },
+        {
+          id: "xK5IkgPX1LTYdWLFzW8X",
+          apostille: null,
+          userInput: "",
+          documentsNotReadyYet: false,
+          needHelpDrafting: false,
+          proofOfRepresentation: null,
+          files: [],
+        },
+      ],
+    };
+
+    expect(
+      resolveFileUploadProductId(
+        "nie-application-demo-joshua_timms.pdf",
+        collected,
+        spainCatalog,
+      ),
+    ).toBe("UpEJ7raQEKQKFhWn12r2");
+
+    expect(
+      resolveFileUploadProductId(
+        "nie-application-demo-joshua_timms.pdf",
+        collected,
+        spainCatalog,
+        "xK5IkgPX1LTYdWLFzW8X",
+      ),
+    ).toBe("xK5IkgPX1LTYdWLFzW8X");
+  });
+
+  test("validateFileForProductUpload rejects file already owned by another product", () => {
+    const collected = {
+      destinationCountry: "ES",
+      products: [
+        {
+          id: "UpEJ7raQEKQKFhWn12r2",
+          apostille: true,
+          userInput: "",
+          documentsNotReadyYet: false,
+          needHelpDrafting: false,
+          proofOfRepresentation: null,
+          files: ["nie-application-demo-joshua_timms.pdf"],
+        },
+        {
+          id: "xK5IkgPX1LTYdWLFzW8X",
+          apostille: null,
+          userInput: "",
+          documentsNotReadyYet: false,
+          needHelpDrafting: false,
+          proofOfRepresentation: null,
+          files: [],
+        },
+      ],
+    };
+
+    const result = validateFileForProductUpload({
+      fileName: "nie-application-demo-joshua_timms.pdf",
+      targetProductId: "xK5IkgPX1LTYdWLFzW8X",
+      collected,
+      catalog: spainCatalog,
+      sessionFileOwners: {
+        "nie-application-demo-joshua_timms.pdf": "UpEJ7raQEKQKFhWn12r2",
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.message).toContain("already attached");
+      expect(result.message).toContain("NIE Personal Data");
+    }
+  });
+
+  test("autoAttachSessionFiles does not cross-assign application pdf to NIE Personal Data", () => {
+    let collected = applyAnswer(
+      fixtureForm,
+      { destinationCountry: "ES" },
+      { type: "productPicker", id: "pp", accessor: "products" },
+      "UpEJ7raQEKQKFhWn12r2",
+      spainCatalog,
+    );
+
+    collected = autoAttachSessionFiles(
+      fixtureForm,
+      collected,
+      spainCatalog,
+      ["nie-application-demo-joshua_timms.pdf"],
+      {
+        "nie-application-demo-joshua_timms.pdf": "UpEJ7raQEKQKFhWn12r2",
+      },
+    );
+
+    const nieData = collected.products?.find(
+      (product) => product.id === "xK5IkgPX1LTYdWLFzW8X",
+    );
+    expect(nieData?.files).toEqual([]);
   });
 
   test("applyAnswer auto-adds NIE Personal Data after NIE application", () => {
