@@ -9,11 +9,27 @@ import {
   type CSSProperties,
 } from "react";
 
+import { toast } from "sonner";
+
+import { ChatMessageBubble } from "@/components/ChatMessageBubble";
+import { ConsentForm } from "@/components/ConsentForm";
+import { CountrySearchSelect } from "@/components/CountrySearchSelect";
+import { rankOcrCountrySuggestions } from "@/components/ocr-country-suggestions";
+import { InlineFileUploadCard } from "@/components/InlineFileUploadCard";
+import {
+  countryFlag,
+  extractCountryCodeFromOption,
+} from "@/components/country-display";
+import { getSupportedDestinationCountries } from "@/components/supported-countries";
+import { phoneFlagOrPlaceholder } from "@/components/phone-flag";
+import { friendlyErrorMessage } from "@/components/friendly-errors";
+import { HeroLanding } from "@/components/HeroLanding";
+import { ParticipantsForm } from "@/components/ParticipantsForm";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Card,
-  CardContent,
   CardDescription,
   CardFooter,
   CardHeader,
@@ -37,8 +53,12 @@ import type {
   FormField,
   StepOption,
 } from "@/lib/engine";
-import type { PriceLineItem } from "@/lib/notarity-api";
-import { validatePartyFormValues } from "@/lib/field-validation";
+import type { PriceLineItem } from "@/lib/notarity";
+import {
+  isBusinessBillingSelected,
+  isPartyFormValid,
+  validatePartyFormFields,
+} from "@/components/party-form-validation";
 import { formatOcrSummary } from "@/lib/ocr-summary";
 import type { OcrResponse } from "@/lib/ocr-types";
 import {
@@ -65,6 +85,8 @@ type ChatSnapshot = {
   messages: ChatMessage[];
   options: StepOption[] | undefined;
   formStep: FormStep | null;
+  participantsStep: ParticipantsStep | null;
+  consentStep: ConsentStep | null;
   fileUploadStep: FileUploadStep | null;
   currentAccessor: string | undefined;
   runningPrice: number | undefined;
@@ -76,6 +98,10 @@ type ChatProps = {
   onComplete: (booking: CompleteBooking | null) => void;
   resumeFrom?: { state: EngineState; step: EngineStep } | null;
   onResumeHandled?: () => void;
+  onSessionProgress?: (update: {
+    collected: Partial<AppointmentRequest>;
+    finished: boolean;
+  }) => void;
 };
 
 type ChatResponse = {
@@ -84,6 +110,8 @@ type ChatResponse = {
 };
 
 type FormStep = Extract<EngineStep, { type: "form" }>;
+type ParticipantsStep = Extract<EngineStep, { type: "participants" }>;
+type ConsentStep = Extract<EngineStep, { type: "consent" }>;
 type FileUploadStep = Extract<EngineStep, { type: "fileUpload" }>;
 
 type AddressSuggestion = {
@@ -203,21 +231,29 @@ function AddressAutocompleteInput({
   );
 }
 
-function scrollToBottom(element: HTMLDivElement | null): void {
-  if (!element) return;
-  const prefersReducedMotion = window.matchMedia(
-    "(prefers-reduced-motion: reduce)",
-  ).matches;
+function prefersReducedMotion(): boolean {
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+function scrollIntoStep(
+  element: HTMLElement | null,
+  block: ScrollLogicalPosition = "start",
+): void {
+  if (!element) {
+    return;
+  }
   element.scrollIntoView({
-    block: "end",
-    behavior: prefersReducedMotion ? "auto" : "smooth",
+    block,
+    behavior: prefersReducedMotion() ? "auto" : "smooth",
   });
 }
 
-const COUNTRY_FLAG: Record<string, string> = {
-  ES: "🇪🇸",
-  AT: "🇦🇹",
-};
+function contentOverflows(container: HTMLElement | null): boolean {
+  if (!container) {
+    return false;
+  }
+  return container.scrollHeight > container.clientHeight + 1;
+}
 
 function hasConfirmableOcr(ocr: OcrResponse): boolean {
   return Boolean(
@@ -231,6 +267,7 @@ function OcrConfirmPanel({
   ocr,
   loading,
   countryConfirmed,
+  supportedCountries,
   onCountry,
   onProduct,
   onSkip,
@@ -238,39 +275,103 @@ function OcrConfirmPanel({
   ocr: OcrResponse;
   loading: boolean;
   countryConfirmed: boolean;
+  supportedCountries: { code: string; label: string }[];
   onCountry: (country: { code: string; label: string }) => void;
   onProduct: (product: { id: string; title: string }) => void;
   onSkip: () => void;
 }): React.ReactElement {
+  const [showFullCountrySearch, setShowFullCountrySearch] = useState(false);
+
+  const showCountryStep =
+    !countryConfirmed &&
+    Boolean(ocr.destinationCountry || supportedCountries.length > 0);
+
+  const topCountrySuggestions = useMemo(
+    () =>
+      rankOcrCountrySuggestions(
+        supportedCountries,
+        ocr.destinationCountry,
+        ocr.destinationCountryLabel,
+      ),
+    [
+      supportedCountries,
+      ocr.destinationCountry,
+      ocr.destinationCountryLabel,
+    ],
+  );
+
   const showProducts =
     Boolean(ocr.productOptions?.length) &&
-    (countryConfirmed || !ocr.countryOptions?.length);
+    (countryConfirmed || !showCountryStep);
 
   return (
-    <div className="flex min-w-0 flex-col gap-3 rounded-2xl border border-border bg-muted/50 p-4">
-      {ocr.countryOptions && ocr.countryOptions.length > 0 && !countryConfirmed && (
+    <div className="step-enter flex min-w-0 flex-col gap-3 rounded-2xl border border-primary/15 bg-primary/5 p-4">
+      {showCountryStep && (
         <div className="flex min-w-0 flex-col gap-2">
           <p className="text-sm font-medium text-foreground">Destination country</p>
-          <div className="flex flex-wrap gap-2">
-            {ocr.countryOptions.map((country) => {
-              const suggested = country.code === ocr.destinationCountry;
-              const flag = COUNTRY_FLAG[country.code] ?? "";
-              return (
+          {showFullCountrySearch ? (
+            <CountrySearchSelect
+              countries={supportedCountries}
+              loading={loading}
+              onSelect={(country) => {
+                setShowFullCountrySearch(false);
+                onCountry(country);
+              }}
+            />
+          ) : (
+            <>
+              <ul className="flex min-w-0 flex-col gap-1">
+                {topCountrySuggestions.map((country) => {
+                  const suggested = country.code === ocr.destinationCountry;
+                  const flag = countryFlag(country.code);
+                  return (
+                    <li key={country.code} role="presentation">
+                      <button
+                        type="button"
+                        disabled={loading}
+                        className={cn(
+                          "flex w-full min-w-0 items-center gap-2 rounded-lg border px-3 py-2 text-left text-sm transition-colors disabled:opacity-50",
+                          suggested
+                            ? "border-primary/30 bg-primary/10 text-foreground hover:bg-primary/15"
+                            : "border-border/80 bg-card text-foreground hover:bg-primary/8",
+                        )}
+                        onClick={() => onCountry(country)}
+                      >
+                        {flag ? (
+                          <span className="text-base leading-none" aria-hidden>
+                            {flag}
+                          </span>
+                        ) : null}
+                        <span className="min-w-0 flex-1 truncate">
+                          {country.label}
+                        </span>
+                        <span className="shrink-0 text-xs text-muted-foreground">
+                          {country.code}
+                        </span>
+                        {suggested ? (
+                          <span className="shrink-0 text-xs font-medium text-primary">
+                            Suggested
+                          </span>
+                        ) : null}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+              {supportedCountries.length > topCountrySuggestions.length && (
                 <Button
-                  key={country.code}
                   type="button"
+                  variant="link"
                   size="sm"
-                  variant={suggested ? "default" : "outline"}
                   disabled={loading}
-                  className="h-auto min-w-0 max-w-full whitespace-normal py-1.5"
-                  onClick={() => onCountry(country)}
+                  className="h-auto self-start px-0 text-primary"
+                  onClick={() => setShowFullCountrySearch(true)}
                 >
-                  {country.label} ({country.code}){flag ? ` ${flag}` : ""}
-                  {suggested ? " · suggested" : ""}
+                  Search all countries
                 </Button>
-              );
-            })}
-          </div>
+              )}
+            </>
+          )}
         </div>
       )}
 
@@ -355,10 +456,10 @@ function DocumentUploadZone({
   return (
     <div
       className={cn(
-        "flex min-w-0 flex-col items-center gap-3 rounded-2xl border border-dashed px-4 py-6 text-center transition-colors",
+        "step-enter flex min-w-0 flex-col items-center gap-3 rounded-2xl border border-dashed px-4 py-6 text-center transition-colors motion-reduce:transition-none",
         dragOver
-          ? "border-primary bg-primary/5"
-          : "border-border bg-muted/30",
+          ? "border-primary bg-primary/8 shadow-sm"
+          : "border-border bg-card",
         (disabled || busy) && "pointer-events-none opacity-60",
       )}
       onDragOver={(event) => {
@@ -415,6 +516,31 @@ function DocumentUploadZone({
   );
 }
 
+/** Aligns inline step cards with assistant message bubbles (avatar gutter + max-w-[85%]). */
+function AssistantStepRow({
+  children,
+  className,
+  innerRef,
+}: {
+  children: React.ReactNode;
+  className?: string;
+  innerRef?: React.Ref<HTMLDivElement>;
+}): React.ReactElement {
+  return (
+    <div
+      ref={innerRef}
+      className={cn("flex min-w-0 gap-2 justify-start", className)}
+    >
+      <Avatar size="sm" className="mt-0.5 shrink-0 bg-primary/10">
+        <AvatarFallback className="bg-primary/10 text-[10px] font-semibold text-primary">
+          AI
+        </AvatarFallback>
+      </Avatar>
+      <div className="min-w-0 w-full max-w-[85%]">{children}</div>
+    </div>
+  );
+}
+
 function TypingIndicator(): React.ReactElement {
   return (
     <div
@@ -423,14 +549,21 @@ function TypingIndicator(): React.ReactElement {
       aria-live="polite"
       aria-label="Assistant is typing"
     >
-      <div className="flex gap-1 motion-reduce:hidden">
-        <span className="size-1.5 animate-bounce rounded-full bg-muted-foreground/60 [animation-delay:0ms]" />
-        <span className="size-1.5 animate-bounce rounded-full bg-muted-foreground/60 [animation-delay:150ms]" />
-        <span className="size-1.5 animate-bounce rounded-full bg-muted-foreground/60 [animation-delay:300ms]" />
+      <Avatar size="sm" className="bg-primary/10">
+        <AvatarFallback className="bg-primary/10 text-[10px] font-semibold text-primary">
+          AI
+        </AvatarFallback>
+      </Avatar>
+      <div className="flex items-center gap-2 rounded-2xl border border-border/60 bg-card px-3 py-2">
+        <div className="flex gap-1 motion-reduce:hidden">
+          <span className="size-1.5 animate-bounce rounded-full bg-primary [animation-delay:0ms]" />
+          <span className="size-1.5 animate-bounce rounded-full bg-primary [animation-delay:150ms]" />
+          <span className="size-1.5 animate-bounce rounded-full bg-primary [animation-delay:300ms]" />
+        </div>
+        <span className="text-xs text-muted-foreground motion-reduce:font-medium">
+          Typing…
+        </span>
       </div>
-      <span className="text-xs text-muted-foreground motion-reduce:font-medium">
-        Typing…
-      </span>
     </div>
   );
 }
@@ -491,7 +624,14 @@ export function TimeslotPicker({
 
   if (dayGroups.length === 0) {
     return (
-      <p className="text-sm text-muted-foreground">No available timeslots.</p>
+      <div className="step-enter rounded-2xl border border-dashed border-border bg-muted/40 px-4 py-6 text-center">
+        <p className="text-sm font-medium text-foreground">
+          No timeslots available right now
+        </p>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Try again in a moment or pick a different day range in chat.
+        </p>
+      </div>
     );
   }
 
@@ -602,10 +742,19 @@ export function PartyForm({
 }): React.ReactElement {
   const [values, setValues] = useState<Record<string, string>>(() =>
     Object.fromEntries(
-      step.fields.map((f) => [f.name, initialValues?.[f.name] ?? ""]),
+      step.fields.map((field) => [
+        field.name,
+        initialValues?.[field.name] ?? field.defaultValue ?? "",
+      ]),
     ),
   );
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const [touched, setTouched] = useState<Record<string, boolean>>({});
+
+  const formValid = useMemo(
+    () => isPartyFormValid(values, step.fields),
+    [values, step.fields],
+  );
 
   const handleChange = (field: FormField, value: string) => {
     setValues((prev) => ({ ...prev, [field.name]: value }));
@@ -620,7 +769,7 @@ export function PartyForm({
   };
 
   const validateField = (field: FormField) => {
-    const errors = validatePartyFormValues(values, [field]);
+    const errors = validatePartyFormFields(values, [field]);
     const message = errors[field.name];
     setFieldErrors((prev) => {
       const next = { ...prev };
@@ -646,25 +795,73 @@ export function PartyForm({
 
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
-    const errors = validatePartyFormValues(values, step.fields);
+    const errors = validatePartyFormFields(values, step.fields);
     if (Object.keys(errors).length > 0) {
       setFieldErrors(errors);
+      setTouched(
+        Object.fromEntries(step.fields.map((field) => [field.name, true])),
+      );
       return;
     }
     onSubmit(values);
   };
 
+  const inputTypeForField = (field: FormField): string => {
+    if (field.name === "email") {
+      return "email";
+    }
+    if (field.name === "phoneNumber") {
+      return "tel";
+    }
+    return field.type;
+  };
+
   return (
     <form
       onSubmit={handleSubmit}
-      className="flex min-w-0 max-w-full flex-col gap-3 rounded-2xl border border-border bg-muted/50 p-4"
+      className="flex w-full min-w-0 max-w-full flex-col gap-3 rounded-2xl border border-border bg-card p-4 shadow-sm"
     >
       <p className="text-sm font-medium">{step.title}</p>
       {step.error ? (
         <p className="text-sm text-destructive">{step.error}</p>
       ) : null}
       <div className="grid gap-3 sm:grid-cols-2">
-        {step.fields.map((field) => (
+        {step.fields.map((field) => {
+          if (
+            (field.name === "companyName" || field.name === "vat") &&
+            !isBusinessBillingSelected(values)
+          ) {
+            return null;
+          }
+
+          if (field.type === "checkbox") {
+            const checked = isBusinessBillingSelected(values);
+            return (
+              <div
+                key={field.name}
+                className="flex min-w-0 items-center gap-2 sm:col-span-2"
+              >
+                <input
+                  id={`${step.accessor}-${field.name}`}
+                  type="checkbox"
+                  checked={checked}
+                  disabled={loading}
+                  onChange={(event) =>
+                    handleChange(field, event.target.checked ? "true" : "false")
+                  }
+                  className="size-4 rounded border border-input"
+                />
+                <Label
+                  htmlFor={`${step.accessor}-${field.name}`}
+                  className="text-xs font-normal"
+                >
+                  {field.label}
+                </Label>
+              </div>
+            );
+          }
+
+          return (
           <div
             key={field.name}
             className={cn(
@@ -674,7 +871,11 @@ export function PartyForm({
           >
             <Label htmlFor={`${step.accessor}-${field.name}`} className="text-xs">
               {field.label}
-              {field.required ? " *" : ""}
+              {(field.required ||
+                (field.name === "companyName" &&
+                  isBusinessBillingSelected(values))) ? (
+                " *"
+              ) : null}
             </Label>
             {field.name === "address" ? (
               <AddressAutocompleteInput
@@ -686,29 +887,69 @@ export function PartyForm({
                 onSelect={applyAddressSuggestion}
               />
             ) : (
-              <Input
-                id={`${step.accessor}-${field.name}`}
-                type={field.type}
-                required={field.required}
-                value={values[field.name] ?? ""}
-                onChange={(event) => handleChange(field, event.target.value)}
-                onBlur={() => {
-                  if (field.name === "email" || field.name === "phoneNumber") {
-                    validateField(field);
+              <div className="relative min-w-0">
+                {field.name === "phoneNumber" &&
+                phoneFlagOrPlaceholder(values[field.name] ?? "") ? (
+                  <span
+                    className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-base"
+                    aria-hidden
+                  >
+                    {phoneFlagOrPlaceholder(values[field.name] ?? "")}
+                  </span>
+                ) : null}
+                <Input
+                  id={`${step.accessor}-${field.name}`}
+                  type={inputTypeForField(field)}
+                  required={field.required}
+                  value={values[field.name] ?? ""}
+                  onChange={(event) => handleChange(field, event.target.value)}
+                  onBlur={() => {
+                    setTouched((prev) => ({ ...prev, [field.name]: true }));
+                    if (
+                      field.name === "email" ||
+                      field.name === "phoneNumber" ||
+                      field.name === "companyName" ||
+                      field.required
+                    ) {
+                      validateField(field);
+                    }
+                  }}
+                  disabled={loading}
+                  aria-invalid={Boolean(fieldErrors[field.name])}
+                  aria-describedby={
+                    fieldErrors[field.name]
+                      ? `${step.accessor}-${field.name}-error`
+                      : undefined
                   }
-                }}
-                disabled={loading}
-                aria-invalid={Boolean(fieldErrors[field.name])}
-                className="min-w-0"
-              />
+                  className={cn(
+                    "min-w-0",
+                    field.name === "phoneNumber" &&
+                      phoneFlagOrPlaceholder(values[field.name] ?? "")
+                      ? "pl-10"
+                      : undefined,
+                  )}
+                />
+              </div>
             )}
-            {fieldErrors[field.name] ? (
-              <p className="text-xs text-destructive">{fieldErrors[field.name]}</p>
+            {fieldErrors[field.name] && touched[field.name] ? (
+              <p
+                id={`${step.accessor}-${field.name}-error`}
+                className="text-xs text-destructive"
+                role="alert"
+              >
+                {fieldErrors[field.name]}
+              </p>
             ) : null}
           </div>
-        ))}
+          );
+        })}
       </div>
-      <Button type="submit" disabled={loading} className="w-full sm:w-auto">
+      <Button
+        type="submit"
+        disabled={loading || !formValid}
+        className="w-full sm:w-auto"
+        aria-disabled={loading || !formValid}
+      >
         {submitLabel}
       </Button>
     </form>
@@ -720,6 +961,8 @@ function snapshotFromClient(args: {
   messages: ChatMessage[];
   options: StepOption[] | undefined;
   formStep: FormStep | null;
+  participantsStep: ParticipantsStep | null;
+  consentStep: ConsentStep | null;
   fileUploadStep: FileUploadStep | null;
   currentAccessor: string | undefined;
   runningPrice: number | undefined;
@@ -729,16 +972,26 @@ function snapshotFromClient(args: {
   return { ...args };
 }
 
+function reportChatError(message: string): string {
+  const friendly = friendlyErrorMessage(new Error(message));
+  toast.error("Could not continue", { description: friendly });
+  return friendly;
+}
+
 export function Chat({
   onComplete,
   resumeFrom,
   onResumeHandled,
+  onSessionProgress,
 }: ChatProps): React.ReactElement {
   const [engineState, setEngineState] = useState<EngineState | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [options, setOptions] = useState<StepOption[] | undefined>();
   const [formStep, setFormStep] = useState<FormStep | null>(null);
+  const [participantsStep, setParticipantsStep] =
+    useState<ParticipantsStep | null>(null);
+  const [consentStep, setConsentStep] = useState<ConsentStep | null>(null);
   const [fileUploadStep, setFileUploadStep] = useState<FileUploadStep | null>(
     null,
   );
@@ -746,6 +999,9 @@ export function Chat({
   const [runningPrice, setRunningPrice] = useState<number | undefined>();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [selectedQuickReply, setSelectedQuickReply] = useState<string | null>(
+    null,
+  );
   const [finished, setFinished] = useState(false);
   const [historyDepth, setHistoryDepth] = useState(0);
   const [docSeedComplete, setDocSeedComplete] = useState(false);
@@ -758,7 +1014,19 @@ export function Chat({
   const uploadedFilesRef = useRef<File[]>([]);
   const sessionFileOwnersRef = useRef<Record<string, string>>({});
   const bootstrapped = useRef(false);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const lastMessageRef = useRef<HTMLDivElement>(null);
+  const formStepRef = useRef<HTMLDivElement>(null);
+  const participantsStepRef = useRef<HTMLDivElement>(null);
+  const consentStepRef = useRef<HTMLDivElement>(null);
+  const timeslotStepRef = useRef<HTMLDivElement>(null);
+  const fileUploadStepRef = useRef<HTMLDivElement>(null);
+  const ocrPanelRef = useRef<HTMLDivElement>(null);
+  const prevMessageCountRef = useRef(0);
+  const prevFormAccessorRef = useRef<string | null>(null);
+  const prevTimeslotPickerRef = useRef(false);
+  const prevFileUploadStepRef = useRef<string | null>(null);
+  const prevPendingOcrRef = useRef(false);
   const historyStackRef = useRef<ChatSnapshot[]>([]);
   const accessorSnapshotsRef = useRef<Record<string, ChatSnapshot>>({});
   const pendingSnapshotRef = useRef<ChatSnapshot | null>(null);
@@ -769,6 +1037,8 @@ export function Chat({
       messages,
       options,
       formStep,
+      participantsStep,
+      consentStep,
       fileUploadStep,
       currentAccessor,
       runningPrice,
@@ -780,6 +1050,8 @@ export function Chat({
     messages,
     options,
     formStep,
+    participantsStep,
+    consentStep,
     fileUploadStep,
     currentAccessor,
     runningPrice,
@@ -795,6 +1067,8 @@ export function Chat({
       setMessages(snapshot.messages);
       setOptions(snapshot.options);
       setFormStep(snapshot.formStep);
+      setParticipantsStep(snapshot.participantsStep);
+      setConsentStep(snapshot.consentStep);
       setFileUploadStep(snapshot.fileUploadStep);
       setCurrentAccessor(snapshot.currentAccessor);
       setRunningPrice(snapshot.runningPrice);
@@ -840,6 +1114,8 @@ export function Chat({
         setFinished(true);
         setOptions(undefined);
         setFormStep(null);
+        setParticipantsStep(null);
+        setConsentStep(null);
         setFileUploadStep(null);
         setCurrentAccessor(undefined);
         setRunningPrice(undefined);
@@ -856,6 +1132,8 @@ export function Chat({
 
       if (response.step.type === "form") {
         setFormStep(response.step);
+        setParticipantsStep(null);
+        setConsentStep(null);
         setFileUploadStep(null);
         setCurrentAccessor(response.step.accessor);
         setOptions(undefined);
@@ -866,6 +1144,58 @@ export function Chat({
             messages: response.state.messages,
             options: undefined,
             formStep: response.step,
+            participantsStep: null,
+            consentStep: null,
+            fileUploadStep: null,
+            currentAccessor: response.step.accessor,
+            runningPrice: response.step.euroTotal,
+            finished: false,
+            fileNames: uploadedFilesRef.current.map((file) => file.name),
+          });
+        return;
+      }
+
+      if (response.step.type === "participants") {
+        setFormStep(null);
+        setParticipantsStep(response.step);
+        setConsentStep(null);
+        setFileUploadStep(null);
+        setCurrentAccessor(response.step.accessor);
+        setOptions(undefined);
+        setRunningPrice(response.step.euroTotal);
+        accessorSnapshotsRef.current[response.step.accessor] =
+          snapshotFromClient({
+            engineState: response.state,
+            messages: response.state.messages,
+            options: undefined,
+            formStep: null,
+            participantsStep: response.step,
+            consentStep: null,
+            fileUploadStep: null,
+            currentAccessor: response.step.accessor,
+            runningPrice: response.step.euroTotal,
+            finished: false,
+            fileNames: uploadedFilesRef.current.map((file) => file.name),
+          });
+        return;
+      }
+
+      if (response.step.type === "consent") {
+        setFormStep(null);
+        setParticipantsStep(null);
+        setConsentStep(response.step);
+        setFileUploadStep(null);
+        setCurrentAccessor(response.step.accessor);
+        setOptions(undefined);
+        setRunningPrice(response.step.euroTotal);
+        accessorSnapshotsRef.current[response.step.accessor] =
+          snapshotFromClient({
+            engineState: response.state,
+            messages: response.state.messages,
+            options: undefined,
+            formStep: null,
+            participantsStep: null,
+            consentStep: response.step,
             fileUploadStep: null,
             currentAccessor: response.step.accessor,
             runningPrice: response.step.euroTotal,
@@ -877,6 +1207,8 @@ export function Chat({
 
       if (response.step.type === "fileUpload") {
         setFormStep(null);
+        setParticipantsStep(null);
+        setConsentStep(null);
         setFileUploadStep(response.step);
         setCurrentAccessor(response.step.accessor);
         setOptions(undefined);
@@ -887,6 +1219,8 @@ export function Chat({
             messages: response.state.messages,
             options: undefined,
             formStep: null,
+            participantsStep: null,
+            consentStep: null,
             fileUploadStep: response.step,
             currentAccessor: response.step.accessor,
             runningPrice: response.step.euroTotal,
@@ -897,6 +1231,8 @@ export function Chat({
       }
 
       setFormStep(null);
+      setParticipantsStep(null);
+      setConsentStep(null);
       setFileUploadStep(null);
       setCurrentAccessor(response.step.accessor);
       setOptions(response.step.options);
@@ -907,6 +1243,8 @@ export function Chat({
           messages: response.state.messages,
           options: response.step.options,
           formStep: null,
+          participantsStep: null,
+          consentStep: null,
           fileUploadStep: null,
           currentAccessor: response.step.accessor,
           runningPrice: response.step.euroTotal,
@@ -977,7 +1315,10 @@ export function Chat({
         return data;
       } catch (err) {
         pendingSnapshotRef.current = null;
-        setError(err instanceof Error ? err.message : "Something went wrong");
+        const friendly = reportChatError(
+          err instanceof Error ? err.message : "Something went wrong",
+        );
+        setError(friendly);
         return null;
       } finally {
         if (manageLoading) {
@@ -996,7 +1337,7 @@ export function Chat({
   );
 
   const sendStructuredAnswer = useCallback(
-    async (values: Record<string, string>) => {
+    async (values: Record<string, unknown>) => {
       await postChat({ userMessage: "", structuredAnswer: values });
     },
     [postChat],
@@ -1010,9 +1351,110 @@ export function Chat({
     void sendMessage("");
   }, [sendMessage]);
 
+  const showTimeslotPicker =
+    currentAccessor === "timeslots" &&
+    Boolean(options?.length) &&
+    !loading &&
+    !finished &&
+    !formStep &&
+    !participantsStep &&
+    !consentStep;
+
   useEffect(() => {
-    scrollToBottom(bottomRef.current);
-  }, [messages, loading, formStep, fileUploadStep]);
+    const scrollTimer = window.setTimeout(() => {
+      const container = messagesContainerRef.current;
+      const overflow = contentOverflows(container);
+
+      if (participantsStep) {
+        if (overflow) {
+          scrollIntoStep(participantsStepRef.current, "nearest");
+        }
+        return;
+      }
+
+      if (consentStep) {
+        if (overflow) {
+          scrollIntoStep(consentStepRef.current, "nearest");
+        }
+        return;
+      }
+
+      if (formStep) {
+        const accessor = formStep.accessor;
+        if (accessor !== prevFormAccessorRef.current) {
+          prevFormAccessorRef.current = accessor;
+          if (overflow) {
+            scrollIntoStep(formStepRef.current, "nearest");
+          }
+        }
+        return;
+      }
+      prevFormAccessorRef.current = null;
+
+      if (showTimeslotPicker) {
+        if (!prevTimeslotPickerRef.current) {
+          prevTimeslotPickerRef.current = true;
+          if (overflow) {
+            scrollIntoStep(timeslotStepRef.current, "nearest");
+          }
+        }
+        return;
+      }
+      prevTimeslotPickerRef.current = false;
+
+      if (fileUploadStep) {
+        const productId = fileUploadStep.productId;
+        if (productId !== prevFileUploadStepRef.current) {
+          prevFileUploadStepRef.current = productId;
+          if (overflow) {
+            scrollIntoStep(fileUploadStepRef.current, "nearest");
+          }
+        }
+        return;
+      }
+      prevFileUploadStepRef.current = null;
+
+      if (pendingOcr) {
+        if (!prevPendingOcrRef.current) {
+          prevPendingOcrRef.current = true;
+          if (overflow) {
+            scrollIntoStep(ocrPanelRef.current, "nearest");
+          }
+        }
+        return;
+      }
+      prevPendingOcrRef.current = false;
+
+      const messageCount = messages.length;
+      const newMessages = messageCount > prevMessageCountRef.current;
+      prevMessageCountRef.current = messageCount;
+
+      if (newMessages && lastMessageRef.current && overflow) {
+        scrollIntoStep(lastMessageRef.current, "nearest");
+      }
+    }, 0);
+
+    return () => window.clearTimeout(scrollTimer);
+  }, [
+    messages,
+    formStep,
+    participantsStep,
+    consentStep,
+    fileUploadStep,
+    pendingOcr,
+    showTimeslotPicker,
+  ]);
+
+  useEffect(() => {
+    onSessionProgress?.({
+      collected: engineState?.collected ?? {},
+      finished,
+    });
+  }, [engineState?.collected, finished, onSessionProgress]);
+
+  useEffect(() => {
+    setSelectedQuickReply(null);
+  }, [currentAccessor, options]);
 
   useEffect(() => {
     if (!resumeFrom) {
@@ -1041,18 +1483,39 @@ export function Chat({
       });
     } else if (resumeFrom.step.type === "form") {
       setFormStep(resumeFrom.step);
+      setParticipantsStep(null);
+      setConsentStep(null);
+      setFileUploadStep(null);
+      setCurrentAccessor(resumeFrom.step.accessor);
+      setOptions(undefined);
+      setRunningPrice(resumeFrom.step.euroTotal);
+    } else if (resumeFrom.step.type === "participants") {
+      setFormStep(null);
+      setParticipantsStep(resumeFrom.step);
+      setConsentStep(null);
+      setFileUploadStep(null);
+      setCurrentAccessor(resumeFrom.step.accessor);
+      setOptions(undefined);
+      setRunningPrice(resumeFrom.step.euroTotal);
+    } else if (resumeFrom.step.type === "consent") {
+      setFormStep(null);
+      setParticipantsStep(null);
+      setConsentStep(resumeFrom.step);
       setFileUploadStep(null);
       setCurrentAccessor(resumeFrom.step.accessor);
       setOptions(undefined);
       setRunningPrice(resumeFrom.step.euroTotal);
     } else if (resumeFrom.step.type === "fileUpload") {
       setFormStep(null);
+      setParticipantsStep(null);
+      setConsentStep(null);
       setFileUploadStep(resumeFrom.step);
       setCurrentAccessor(resumeFrom.step.accessor);
       setOptions(undefined);
       setRunningPrice(resumeFrom.step.euroTotal);
     } else {
       setFormStep(null);
+      setParticipantsStep(null);
       setFileUploadStep(null);
       setCurrentAccessor(resumeFrom.step.accessor);
       setOptions(resumeFrom.step.options);
@@ -1065,7 +1528,15 @@ export function Chat({
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
     const trimmed = input.trim();
-    if (!trimmed || loading || finished || formStep || fileUploadStep) {
+    if (
+      !trimmed ||
+      loading ||
+      finished ||
+      formStep ||
+      participantsStep ||
+      consentStep ||
+      fileUploadStep
+    ) {
       return;
     }
     setInput("");
@@ -1073,9 +1544,10 @@ export function Chat({
   };
 
   const handleQuickReply = (option: StepOption) => {
-    if (loading || finished || formStep || fileUploadStep) {
+    if (loading || finished || formStep || participantsStep || consentStep || fileUploadStep) {
       return;
     }
+    setSelectedQuickReply(option.value);
     void sendMessage(option.value);
   };
 
@@ -1186,7 +1658,13 @@ export function Chat({
         setMessages((prev) =>
           prev.filter((message) => message.content !== "Reading your document…"),
         );
-        setError(err instanceof Error ? err.message : "Could not read document");
+        const friendly = reportChatError(
+          err instanceof Error ? err.message : "Could not read document",
+        );
+        setError(friendly);
+        toast.message("Couldn't read the doc", {
+          description: "Let's fill it in together — type your answers below.",
+        });
       } finally {
         setOcrReading(false);
       }
@@ -1319,12 +1797,34 @@ export function Chat({
     [engineState, finishOcrProduct, options, pendingOcr, postChat],
   );
 
-  const showTimeslotPicker =
-    currentAccessor === "timeslots" &&
-    Boolean(options?.length) &&
-    !loading &&
+  const supportedCountries = useMemo(
+    () =>
+      engineState?.form
+        ? getSupportedDestinationCountries(engineState.form)
+        : [],
+    [engineState?.form],
+  );
+
+  const showCountryPickerStep =
+    currentAccessor === "destinationCountry" &&
     !finished &&
-    !formStep;
+    !pendingOcr &&
+    !formStep &&
+    !participantsStep &&
+    !consentStep &&
+    !fileUploadStep;
+
+  const handleManualCountrySelect = useCallback(
+    (country: { code: string; label: string }) => {
+      if (loading || finished) {
+        return;
+      }
+      void sendMessage(
+        countryQuickReplyValue(country.code, country.label, options),
+      );
+    },
+    [finished, loading, options, sendMessage],
+  );
 
   const showQuickReplies =
     Boolean(options?.length) &&
@@ -1332,8 +1832,11 @@ export function Chat({
     !loading &&
     !finished &&
     !formStep &&
+    !participantsStep &&
+    !consentStep &&
     !fileUploadStep &&
-    currentAccessor !== "timeslots";
+    currentAccessor !== "timeslots" &&
+    currentAccessor !== "destinationCountry";
 
   const showEmptyState = messages.length === 0 && loading;
   const showDocUpload =
@@ -1342,28 +1845,27 @@ export function Chat({
     !pendingOcr &&
     (currentAccessor === "destinationCountry" ||
       (messages.length <= 3 && !finished));
-  const showAttachButton =
-    !finished && !loading && Boolean(fileUploadStep);
   const canGoBack = historyDepth > 0 && !loading;
 
-  const handleAttachFileChange = (
-    event: React.ChangeEvent<HTMLInputElement>,
-  ) => {
-    const file = event.target.files?.[0];
-    event.target.value = "";
-    if (!file || loading || finished || !fileUploadStep) {
-      return;
-    }
-    handleEngineFileUpload(file);
-  };
+  const selectedFileForUpload = fileUploadStep
+    ? (uploadedFilesRef.current.find(
+        (file) =>
+          sessionFileOwnersRef.current[file.name] === fileUploadStep.productId,
+      ) ?? null)
+    : null;
+
+  const showHero =
+    showDocUpload && !finished && messages.length <= 2 && !pendingOcr;
 
   return (
-    <Card className="flex h-full min-h-[20rem] flex-col shadow-sm lg:min-h-0">
-      <CardHeader className="border-b border-border pb-4">
+    <Card className="flex h-full min-h-0 flex-col gap-0 overflow-hidden rounded-2xl py-0 shadow-sm [--card-spacing:--spacing(4)] sm:[--card-spacing:--spacing(6)]">
+      <CardHeader className="shrink-0 border-b border-border bg-card pb-4 pt-(--card-spacing)">
         <div className="flex min-w-0 items-start justify-between gap-2">
           <div className="min-w-0">
-            <CardTitle>Chat</CardTitle>
-            <CardDescription>
+            <CardTitle className="text-lg font-semibold tracking-tight">
+              Assistant
+            </CardTitle>
+            <CardDescription className="leading-relaxed">
               Answer naturally — we&apos;ll build your booking from the live form
               schema.
             </CardDescription>
@@ -1374,102 +1876,169 @@ export function Chat({
                 type="button"
                 variant="ghost"
                 size="sm"
+                className="min-h-11 min-w-11 tap-press"
                 onClick={handleBack}
                 disabled={loading}
+                aria-label="Go back to previous step"
               >
                 Back
               </Button>
             )}
             {runningPrice !== undefined && !finished && (
-              <Badge variant="outline" className="tabular-nums">
+              <Badge
+                variant="secondary"
+                className="border-primary/15 bg-primary/8 tabular-nums text-foreground"
+              >
                 €{runningPrice.toFixed(2)}
               </Badge>
             )}
-            {finished && <Badge>Complete</Badge>}
+            {finished && (
+              <Badge className="bg-primary/10 text-primary hover:bg-primary/10">
+                Ready to review
+              </Badge>
+            )}
           </div>
         </div>
       </CardHeader>
 
-      <CardContent className="flex min-h-0 flex-1 flex-col gap-0 overflow-hidden p-0">
-        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4">
-          <div className="flex min-w-0 flex-col gap-3">
+      <div
+        ref={messagesContainerRef}
+        className="min-h-0 flex-1 overflow-y-auto overscroll-contain scroll-pb-4 px-4 pb-4"
+        aria-live="polite"
+        aria-relevant="additions"
+      >
+        <div className="flex min-w-0 flex-col gap-3 pt-6">
             {showEmptyState && (
-              <div className="flex flex-col items-center gap-3 py-8 text-center">
-                <span className="text-4xl" aria-hidden>
-                  👋
-                </span>
-                <p className="max-w-[16rem] text-sm text-muted-foreground">
-                  Starting your booking assistant…
-                </p>
-                <div className="flex w-full max-w-xs flex-col gap-2">
-                  <Skeleton className="h-10 w-full motion-reduce:animate-none" />
-                  <Skeleton className="h-10 w-3/4 motion-reduce:animate-none" />
-                </div>
-              </div>
+              <HeroLanding loading className="step-enter" />
+            )}
+
+            {showHero && !showEmptyState && (
+              <HeroLanding className="step-enter" />
             )}
 
             {showDocUpload && (
-              <DocumentUploadZone
-                disabled={loading || ocrReading || !engineState}
-                busy={ocrReading}
-                onFile={(file) => void processDocumentUpload(file)}
-              />
+              <AssistantStepRow className="step-enter">
+                <DocumentUploadZone
+                  disabled={loading || ocrReading || !engineState}
+                  busy={ocrReading}
+                  onFile={(file) => void processDocumentUpload(file)}
+                />
+              </AssistantStepRow>
             )}
 
-            {messages.map((message, index) => (
-              <div
-                key={`${message.role}-${index}`}
-                className={cn(
-                  "flex min-w-0",
-                  message.role === "user" ? "justify-end" : "justify-start",
-                )}
-              >
-                <div
-                  className={cn(
-                    "min-w-0 max-w-[80%] break-words rounded-2xl px-4 py-2.5 text-sm leading-relaxed [overflow-wrap:anywhere] whitespace-pre-wrap",
-                    message.role === "user"
-                      ? "bg-primary text-primary-foreground"
-                      : "bg-muted text-foreground",
-                  )}
-                >
-                  {message.content}
-                </div>
-              </div>
-            ))}
+            {messages.map((message, index) => {
+              const fileMeta = uploadedFilesRef.current.find(
+                (file) =>
+                  message.content === file.name ||
+                  message.content === `Uploaded ${file.name}`,
+              );
+
+              return (
+                <ChatMessageBubble
+                  key={`${message.role}-${index}-${message.content.slice(0, 24)}`}
+                  role={message.role}
+                  content={message.content}
+                  index={index}
+                  attachmentSizeBytes={fileMeta?.size}
+                  innerRef={
+                    index === messages.length - 1 ? lastMessageRef : undefined
+                  }
+                />
+              );
+            })}
 
             {pendingOcr && !finished && (
-              <OcrConfirmPanel
-                ocr={pendingOcr.result}
-                loading={loading}
-                countryConfirmed={pendingOcr.countryConfirmed}
-                onCountry={(country) => void handleOcrCountry(country)}
-                onProduct={(product) => void handleOcrProduct(product)}
-                onSkip={() => {
-                  setPendingOcr(null);
-                  setDocSeedComplete(true);
-                }}
-              />
+              <AssistantStepRow innerRef={ocrPanelRef}>
+                <OcrConfirmPanel
+                  ocr={pendingOcr.result}
+                  loading={loading}
+                  countryConfirmed={pendingOcr.countryConfirmed}
+                  supportedCountries={supportedCountries}
+                  onCountry={(country) => void handleOcrCountry(country)}
+                  onProduct={(product) => void handleOcrProduct(product)}
+                  onSkip={() => {
+                    setPendingOcr(null);
+                    setDocSeedComplete(true);
+                  }}
+                />
+              </AssistantStepRow>
             )}
 
             {formStep && !finished && (
-              <div className="flex min-w-0 justify-start">
+              <AssistantStepRow
+                innerRef={formStepRef}
+                className="step-enter"
+              >
                 <PartyForm
                   step={formStep}
                   loading={loading}
                   onSubmit={(values) => void sendStructuredAnswer(values)}
                 />
-              </div>
+              </AssistantStepRow>
+            )}
+
+            {participantsStep && !finished && (
+              <AssistantStepRow
+                innerRef={participantsStepRef}
+                className="step-enter"
+              >
+                <ParticipantsForm
+                  step={participantsStep}
+                  loading={loading}
+                  onSubmit={(values) => void sendStructuredAnswer(values)}
+                />
+              </AssistantStepRow>
+            )}
+
+            {consentStep && !finished && (
+              <AssistantStepRow
+                innerRef={consentStepRef}
+                className="step-enter"
+              >
+                <ConsentForm
+                  step={consentStep}
+                  loading={loading}
+                  onSubmit={(values) => void sendStructuredAnswer(values)}
+                />
+              </AssistantStepRow>
+            )}
+
+            {showCountryPickerStep && (
+              <AssistantStepRow className="step-enter">
+                <CountrySearchSelect
+                  countries={supportedCountries}
+                  loading={loading}
+                  onSelect={handleManualCountrySelect}
+                />
+              </AssistantStepRow>
             )}
 
             {showTimeslotPicker && options && engineState?.availableTimeslots && (
-              <div className="flex min-w-0 justify-start">
+              <AssistantStepRow
+                innerRef={timeslotStepRef}
+                className="step-enter"
+              >
                 <TimeslotPicker
                   options={options}
                   availableTimeslots={engineState.availableTimeslots}
                   loading={loading}
                   onConfirm={(slotId) => void sendMessage(slotId)}
                 />
-              </div>
+              </AssistantStepRow>
+            )}
+
+            {fileUploadStep && !finished && (
+              <AssistantStepRow
+                innerRef={fileUploadStepRef}
+                className="step-enter scroll-mt-4"
+              >
+                <InlineFileUploadCard
+                  productLabel={fileUploadStep.productLabel}
+                  loading={loading}
+                  selectedFile={selectedFileForUpload}
+                  onFile={handleEngineFileUpload}
+                />
+              </AssistantStepRow>
             )}
 
             {loading && messages.length > 0 && <TypingIndicator />}
@@ -1477,115 +2046,123 @@ export function Chat({
             {error && (
               <div
                 role="alert"
-                className="min-w-0 rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive break-words [overflow-wrap:anywhere]"
+                className="min-w-0 rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2.5 text-sm text-destructive break-words [overflow-wrap:anywhere]"
               >
                 {error}
               </div>
             )}
 
-            <div ref={bottomRef} className="h-px shrink-0" />
-          </div>
         </div>
+      </div>
 
-        {showQuickReplies && options && (
-          <div className="shrink-0 border-t border-border px-4 py-3">
-            <div className="flex min-w-0 max-h-32 flex-wrap gap-2 overflow-y-auto overscroll-contain">
+      {showQuickReplies && options && (
+        <div className="shrink-0 border-t border-border bg-card px-4 py-3">
+            <p className="mb-2 text-xs font-medium text-muted-foreground">
+              Quick replies
+            </p>
+            <div className="flex min-w-0 max-h-36 flex-wrap gap-2 overflow-y-auto overscroll-contain">
               {options
                 .filter((option) => option.label !== "Auto-added product")
                 .slice(0, 12)
-                .map((option) => (
-                  <Button
-                    key={option.value}
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="h-auto min-w-0 max-w-full whitespace-normal break-words py-1.5 text-left [overflow-wrap:anywhere]"
-                    onClick={() => handleQuickReply(option)}
-                  >
-                    {option.label}
-                  </Button>
-                ))}
+                .map((option) => {
+                  const selected = selectedQuickReply === option.value;
+                  const countryCode = extractCountryCodeFromOption(
+                    option.value,
+                    option.label,
+                  );
+                  const flag = countryCode ? countryFlag(countryCode) : "";
+                  return (
+                    <Button
+                      key={option.value}
+                      type="button"
+                      variant={selected ? "default" : "outline"}
+                      size="sm"
+                      className={cn(
+                        "tap-press h-auto min-h-11 min-w-0 max-w-full whitespace-normal break-words py-2 text-left [overflow-wrap:anywhere]",
+                        selected && "ring-2 ring-primary",
+                      )}
+                      disabled={loading || selected}
+                      aria-pressed={selected}
+                      onClick={() => handleQuickReply(option)}
+                    >
+                      {flag ? (
+                        <span className="mr-1.5" aria-hidden>
+                          {flag}
+                        </span>
+                      ) : null}
+                      {option.label}
+                    </Button>
+                  );
+                })}
             </div>
-          </div>
-        )}
-      </CardContent>
-
-      <CardFooter className="shrink-0 flex-col gap-2 border-t border-border bg-card">
-        <div className="flex w-full min-w-0 items-center gap-2 sm:flex-row">
-          {showAttachButton && (
-            <Button
-              variant="outline"
-              size="sm"
-              className="shrink-0"
-              disabled={loading}
-              asChild
-            >
-              <label className="cursor-pointer">
-                Attach
-                <input
-                  key={fileUploadStep!.productId}
-                  type="file"
-                  accept="application/pdf,.pdf,image/jpeg,image/png,image/webp"
-                  className="hidden"
-                  disabled={loading}
-                  onChange={handleAttachFileChange}
-                />
-              </label>
-            </Button>
-          )}
-          <form
-            onSubmit={handleSubmit}
-            className="flex w-full min-w-0 flex-1 items-center gap-2"
-          >
-          <Input
-            type="text"
-            value={input}
-            onChange={(event) => setInput(event.target.value)}
-            placeholder={
-              finished
-                ? "Booking complete"
-                : fileUploadStep
-                  ? `Attach the document for ${fileUploadStep.productLabel}…`
-                  : formStep
-                    ? "Use the form above…"
-                    : showTimeslotPicker
-                      ? "Pick a time above…"
-                      : showDocUpload
-                        ? "Type an answer or attach a document…"
-                        : "Type your answer…"
-            }
-            disabled={
-              loading ||
-              finished ||
-              Boolean(formStep) ||
-              Boolean(fileUploadStep) ||
-              showTimeslotPicker
-            }
-            className="min-w-0 flex-1"
-            aria-label="Message"
-          />
-          <Button
-            type="submit"
-            disabled={
-              loading ||
-              finished ||
-              Boolean(formStep) ||
-              Boolean(fileUploadStep) ||
-              showTimeslotPicker ||
-              !input.trim()
-            }
-            className="shrink-0"
-          >
-            Send
-          </Button>
-          </form>
         </div>
+      )}
+
+      <CardFooter className="shrink-0 flex-col gap-2 border-t border-border bg-card px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-3">
+        <form
+          onSubmit={handleSubmit}
+          className="flex w-full min-w-0 items-center"
+        >
+          <div
+            className={cn(
+              "flex w-full min-w-0 items-center gap-2 rounded-full border border-border bg-background py-1 pl-3 pr-1 shadow-sm",
+              "focus-within:ring-2 focus-within:ring-primary/25 focus-within:ring-offset-0",
+            )}
+          >
+            <Input
+              type="text"
+              value={input}
+              onChange={(event) => setInput(event.target.value)}
+              placeholder={
+                finished
+                  ? "Booking complete"
+                  : fileUploadStep
+                    ? "Use the upload card above…"
+                    : formStep || participantsStep || consentStep
+                      ? "Use the form above…"
+                      : showTimeslotPicker
+                        ? "Pick a time above…"
+                        : showDocUpload
+                          ? "Type an answer or attach a document…"
+                          : "Type your answer…"
+              }
+              disabled={
+                loading ||
+                finished ||
+                Boolean(formStep) ||
+                Boolean(participantsStep) ||
+                Boolean(consentStep) ||
+                Boolean(fileUploadStep) ||
+                showTimeslotPicker
+              }
+              className="min-h-9 min-w-0 flex-1 border-0 bg-transparent px-2 shadow-none focus-visible:ring-0"
+              aria-label="Message"
+            />
+            <Button
+              type="submit"
+              disabled={
+                loading ||
+                finished ||
+                Boolean(formStep) ||
+                Boolean(participantsStep) ||
+                Boolean(consentStep) ||
+                Boolean(fileUploadStep) ||
+                showTimeslotPicker ||
+                !input.trim()
+              }
+              className="tap-press min-h-9 shrink-0 rounded-full px-4"
+            >
+              Send
+            </Button>
+          </div>
+        </form>
       </CardFooter>
 
       {finished && (
-        <div className="border-t border-border bg-muted/40 px-4 py-3 text-center text-sm text-muted-foreground">
-          All set — review the summary and click <strong>Book it</strong> to
-          submit in debug mode.
+        <div className="shrink-0 border-t border-primary/15 bg-primary/5 px-4 py-3 text-center text-sm text-muted-foreground">
+          All set — review the summary and click{" "}
+          <strong className="text-foreground">Book it</strong> to submit in
+          debug mode.
         </div>
       )}
     </Card>

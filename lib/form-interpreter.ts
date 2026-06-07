@@ -1,6 +1,11 @@
 import { z } from "zod";
 
 import type { AppointmentRequest, ProductSelection } from "./booking-schema";
+import {
+  getParticipantSetup,
+  isParticipantsFilled,
+} from "./participant-config";
+import { PREFERRED_NOTARY_DEFAULT } from "./preferred-notary-config";
 
 // --- Schema types (from GET /booking-form/slug) ---
 
@@ -144,14 +149,12 @@ export type ProductDefinition = {
   showFileUpload?: boolean;
 };
 
-export type Collected = Partial<AppointmentRequest>;
+export type Collected = Partial<AppointmentRequest> & {
+  /** UI/engine meta — stripped before AppointmentRequest.parse */
+  termsAccepted?: boolean;
+};
 
-const SKIP_TYPES = new Set([
-  "condition",
-  "summary",
-  "confirmTC",
-  "singleProduct",
-]);
+const SKIP_TYPES = new Set(["condition", "summary", "singleProduct", "preferredNotary"]);
 
 const INPUT_TYPES = new Set([
   "countryPicker",
@@ -162,6 +165,8 @@ const INPUT_TYPES = new Set([
   "contactDetails",
   "hardCopy",
   "shippingDetails",
+  "confirmTC",
+  "newsletter",
 ]);
 
 export function parseBookingForm(raw: unknown): BookingFormSchema {
@@ -174,6 +179,12 @@ export function getAccessor(component: Component): string | null {
   }
   if (component.type === "shippingDetails") {
     return "shippingDetails";
+  }
+  if (component.type === "confirmTC") {
+    return "confirmTC";
+  }
+  if (component.type === "preferredNotary") {
+    return "preferredNotary";
   }
   return null;
 }
@@ -371,6 +382,16 @@ export function productDisplayName(
   return title || productId;
 }
 
+function getProductsAcceptingOptionalUpload(
+  collected: Collected,
+  catalog: ProductDefinition[],
+): ProductSelection[] {
+  return (collected.products ?? []).filter((product) => {
+    const def = getProductDef(product.id, catalog);
+    return Boolean(def?.showFileUpload && product.files.length === 0);
+  });
+}
+
 /** Resolve which product should receive an uploaded filename (scripted/replay only). */
 export function resolveFileUploadProductId(
   fileName: string,
@@ -379,25 +400,27 @@ export function resolveFileUploadProductId(
   targetProductId?: string,
 ): string | undefined {
   const needing = getProductsNeedingFiles(collected, catalog);
-  if (needing.length === 0) {
+  const candidates =
+    needing.length > 0 ? needing : getProductsAcceptingOptionalUpload(collected, catalog);
+  if (candidates.length === 0) {
     return undefined;
   }
 
   if (
     targetProductId &&
-    needing.some((product) => product.id === targetProductId)
+    candidates.some((product) => product.id === targetProductId)
   ) {
     return targetProductId;
   }
 
-  if (needing.length === 1) {
-    return needing[0]!.id;
+  if (candidates.length === 1) {
+    return candidates[0]!.id;
   }
 
   const normalized = fileName.trim();
 
   if (/personal/i.test(normalized)) {
-    const match = needing.find((product) =>
+    const match = candidates.find((product) =>
       productDisplayName(getProductDef(product.id, catalog), product.id)
         .toLowerCase()
         .includes("personal"),
@@ -408,7 +431,7 @@ export function resolveFileUploadProductId(
   }
 
   if (/application/i.test(normalized)) {
-    const match = needing.find((product) => {
+    const match = candidates.find((product) => {
       const label = productDisplayName(
         getProductDef(product.id, catalog),
         product.id,
@@ -520,8 +543,17 @@ export function autoAttachSessionFiles(
       continue;
     }
 
-    const needing = getProductsNeedingFiles(next, catalog);
-    if (!needing.some((product) => product.id === ownerId)) {
+    const ownerProduct = (next.products ?? []).find(
+      (product) => product.id === ownerId,
+    );
+    const ownerDef = getProductDef(ownerId, catalog);
+    const mayAttach =
+      ownerProduct &&
+      !ownerProduct.files.includes(fileName) &&
+      ownerDef &&
+      (ownerDef.fileUploadRequired || ownerDef.showFileUpload);
+
+    if (!mayAttach) {
       continue;
     }
 
@@ -554,7 +586,7 @@ function isPartyFilled(party: unknown): boolean {
     return false;
   }
   const p = party as Record<string, unknown>;
-  return (
+  const baseFilled =
     typeof p.firstName === "string" &&
     p.firstName.length > 0 &&
     typeof p.lastName === "string" &&
@@ -562,8 +594,26 @@ function isPartyFilled(party: unknown): boolean {
     typeof p.email === "string" &&
     p.email.length > 0 &&
     typeof p.phoneNumber === "string" &&
-    p.phoneNumber.trim().length > 0
-  );
+    p.phoneNumber.trim().length > 0;
+
+  if (!baseFilled) {
+    return false;
+  }
+
+  if (p.business === true) {
+    const details = p.businessDetails as { companyName?: string } | undefined;
+    const companyName =
+      typeof details?.companyName === "string"
+        ? details.companyName.trim()
+        : typeof p.companyName === "string"
+          ? p.companyName.trim()
+          : "";
+    if (!companyName) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function isProductsFilled(
@@ -611,6 +661,14 @@ function isComponentFilled(
   visible: Component[],
   catalog: ProductDefinition[],
 ): boolean {
+  if (component.type === "confirmTC") {
+    const required = component.props?.required !== false;
+    if (!required) {
+      return true;
+    }
+    return collected.termsAccepted === true;
+  }
+
   const accessor = getAccessor(component);
   if (!accessor) {
     return true;
@@ -625,7 +683,7 @@ function isComponentFilled(
     case "products":
       return isProductsFilled(collected, visible, catalog);
     case "participants":
-      return (collected.participants?.length ?? 0) > 0;
+      return isParticipantsFilled(collected, getParticipantSetup(component));
     case "timeslots":
       return (collected.timeslots?.length ?? 0) > 0;
     case "billingDetails":
@@ -657,6 +715,8 @@ function isComponentFilled(
     }
     case "newsletter":
       return collected.newsletter !== undefined;
+    case "preferredNotary":
+      return true;
     default:
       return getByPath(collected, accessor) !== undefined;
   }
@@ -754,11 +814,16 @@ export function applyAnswer(
   targetProductId?: string,
 ): Collected {
   const accessor = getAccessor(component);
+  let next: Collected = { ...collected };
+
+  if (component.type === "confirmTC" || accessor === "confirmTC") {
+    next.termsAccepted = Boolean(value);
+    return applyAutoAddRules(form, next);
+  }
+
   if (!accessor) {
     return collected;
   }
-
-  let next: Collected = { ...collected };
 
   switch (accessor) {
     case "destinationCountry":
@@ -832,6 +897,10 @@ export function applyAnswer(
     case "newsletter":
       next.newsletter = Boolean(value);
       break;
+    case "preferredNotary":
+      next.preferredNotary =
+        typeof value === "string" ? value.trim() : PREFERRED_NOTARY_DEFAULT;
+      break;
     default:
       (next as Record<string, unknown>)[accessor] = value;
   }
@@ -850,8 +919,45 @@ export function getTimeslotLabel(
 
 export type CountryOption = { code: string; label: string };
 
-/** Countries referenced by destinationCountry conditions in the live form schema. */
-export function getCountryOptions(form: BookingFormSchema): CountryOption[] {
+export type DestinationCountryConfig = {
+  /** ISO-2 codes named explicitly in destinationCountry conditions. */
+  explicitCodes: string[];
+  /** When true, any other valid ISO-2 resolves via the form's else branches. */
+  allowsOtherCountries: boolean;
+};
+
+const GENERIC_DESTINATION_PROBE = "LT";
+
+/** Historical ISO codes that share modern display names — exclude from supported lists. */
+const DEPRECATED_REGION_CODES = new Set([
+  "DD",
+  "SU",
+  "CS",
+  "YU",
+  "TP",
+  "ZR",
+]);
+
+function countryDisplayNames(): Intl.DisplayNames {
+  return new Intl.DisplayNames("en", { type: "region" });
+}
+
+export function isValidIsoCountryCodeForDisplay(code: string): boolean {
+  if (!/^[A-Z]{2}$/.test(code)) {
+    return false;
+  }
+  const label = countryDisplayNames().of(code);
+  return Boolean(label && label !== code);
+}
+
+function isValidIsoCountryCode(code: string): boolean {
+  return isValidIsoCountryCodeForDisplay(code);
+}
+
+/** ISO-2 codes named explicitly in destinationCountry conditions (+ countryPicker options). */
+export function getExplicitDestinationCountryCodes(
+  form: BookingFormSchema,
+): string[] {
   const codes = new Set<string>();
 
   function walkObject(obj: unknown): void {
@@ -867,13 +973,13 @@ export function getCountryOptions(form: BookingFormSchema): CountryOption[] {
         const parsed = JSON.parse(record.value) as unknown;
         if (Array.isArray(parsed)) {
           for (const entry of parsed) {
-            codes.add(String(entry));
+            codes.add(String(entry).toUpperCase());
           }
         } else {
-          codes.add(record.value);
+          codes.add(String(record.value).toUpperCase());
         }
       } catch {
-        codes.add(record.value);
+        codes.add(String(record.value).toUpperCase());
       }
     }
     for (const value of Object.values(record)) {
@@ -896,24 +1002,137 @@ export function getCountryOptions(form: BookingFormSchema): CountryOption[] {
       }
       for (const option of component.options) {
         if (typeof option === "string" && option.length === 2) {
-          codes.add(option);
+          codes.add(option.toUpperCase());
         } else if (typeof option === "object" && option !== null) {
           const entry = option as { code?: string; value?: string };
           if (entry.code) {
-            codes.add(entry.code);
+            codes.add(entry.code.toUpperCase());
           } else if (entry.value?.length === 2) {
-            codes.add(entry.value);
+            codes.add(entry.value.toUpperCase());
           }
         }
       }
     }
   }
 
-  const display = new Intl.DisplayNames("en", { type: "region" });
+  return [...codes].sort();
+}
+
+/** True when non-special ISO countries resolve product/timeslot via else branches. */
+export function allowsOtherDestinationCountries(
+  form: BookingFormSchema,
+): boolean {
+  const probe = { destinationCountry: GENERIC_DESTINATION_PROBE };
+  return getVisibleProductPickerTags(form, probe).length > 0;
+}
+
+export function getDestinationCountryConfig(
+  form: BookingFormSchema,
+): DestinationCountryConfig {
+  return {
+    explicitCodes: getExplicitDestinationCountryCodes(form),
+    allowsOtherCountries: allowsOtherDestinationCountries(form),
+  };
+}
+
+export function isDestinationCountrySupported(
+  form: BookingFormSchema,
+  code: string,
+): boolean {
+  const normalized = code.trim().toUpperCase();
+  if (!isValidIsoCountryCode(normalized)) {
+    return false;
+  }
+
+  const { explicitCodes, allowsOtherCountries } =
+    getDestinationCountryConfig(form);
+  if (explicitCodes.includes(normalized)) {
+    return true;
+  }
+
+  if (!allowsOtherCountries) {
+    return false;
+  }
+
+  const collected = { destinationCountry: normalized };
+  return getVisibleProductPickerTags(form, collected).length > 0;
+}
+
+const supportedDestinationCodesCache = new Map<string, string[]>();
+
+/**
+ * Every ISO-2 destination country this booking form accepts — single source of truth
+ * for engine validation, picker, banner, and name matching.
+ * Explicit condition countries (e.g. AT, ES) plus generic-else countries (e.g. LT).
+ */
+export function getSupportedDestinationCountryCodes(
+  form: BookingFormSchema,
+): string[] {
+  const cacheKey = `${form.id ?? "form"}:${getExplicitDestinationCountryCodes(form).join(",")}:${allowsOtherDestinationCountries(form)}`;
+  const cached = supportedDestinationCodesCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const codes = new Set(getExplicitDestinationCountryCodes(form));
+  const { allowsOtherCountries } = getDestinationCountryConfig(form);
+
+  if (allowsOtherCountries) {
+    for (let a = 65; a <= 90; a++) {
+      for (let b = 65; b <= 90; b++) {
+        const code = String.fromCharCode(a) + String.fromCharCode(b);
+        if (
+          !DEPRECATED_REGION_CODES.has(code) &&
+          isDestinationCountrySupported(form, code)
+        ) {
+          codes.add(code);
+        }
+      }
+    }
+  }
+
+  const sorted = [...codes].sort();
+  supportedDestinationCodesCache.set(cacheKey, sorted);
+  return sorted;
+}
+
+export type CountryOptionsArgs = {
+  /** Extra ISO-2 codes to include (e.g. OCR inference) when supported by the form. */
+  ensureCodes?: string[];
+};
+
+/**
+ * Country choices for the destination-country step, OCR confirmation, picker, and banner.
+ * Derived from getSupportedDestinationCountryCodes (same set the engine accepts).
+ */
+export function getCountryOptions(
+  form: BookingFormSchema,
+  args?: CountryOptionsArgs,
+): CountryOption[] {
+  const display = countryDisplayNames();
+  const codes = new Set(getSupportedDestinationCountryCodes(form));
+
+  for (const raw of args?.ensureCodes ?? []) {
+    const normalized = raw.trim().toUpperCase();
+    if (isDestinationCountrySupported(form, normalized)) {
+      codes.add(normalized);
+    }
+  }
+
   return [...codes]
     .sort()
     .map((code) => ({ code, label: display.of(code) ?? code }));
 }
+
+export {
+  formatExplicitSupportedCountriesList,
+  formatUnmatchedDestinationCountryMessage,
+  formatUnsupportedDestinationCountryMessage,
+  normalizeCountryMatchKey,
+  resolveDestinationCountryAnswer,
+  resolveDestinationCountryInput,
+  type DestinationCountryResolution,
+} from "./country-resolution";
 
 export function getVisibleProductPickerTags(
   form: BookingFormSchema,
@@ -953,6 +1172,12 @@ export function componentLabel(
       return "hard copy delivery";
     case "shippingDetails":
       return "shipping details";
+    case "confirmTC":
+      return "terms and conditions";
+    case "newsletter":
+      return "newsletter";
+    case "preferredNotary":
+      return "preferred notary";
     default:
       return component.type;
   }

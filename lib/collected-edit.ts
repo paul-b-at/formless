@@ -144,6 +144,9 @@ function deleteAccessor(collected: Collected, accessor: string): void {
     case "newsletter":
       delete collected.newsletter;
       break;
+    case "confirmTC":
+      delete collected.termsAccepted;
+      break;
     default:
       delete (collected as Record<string, unknown>)[accessor];
   }

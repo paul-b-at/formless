@@ -14,7 +14,7 @@ import {
   type EngineStep,
 } from "../lib/engine";
 import { parseBookingForm } from "../lib/form-interpreter";
-import { getBookingForm, priceRequest, sumNetToEuros } from "../lib/notarity-api";
+import { getBookingForm, priceRequest, sumNetToEuros } from "../lib/notarity";
 
 const JOSHUA_BILLING = {
   firstName: "Joshua",
@@ -167,8 +167,30 @@ function nextScriptedAnswer(
     return { userMessage: next.value };
   }
 
+  if (step.type === "participants") {
+    const queue = answerQueues.participants;
+    const next = queue?.shift();
+    if (!next) {
+      throw new Error("No scripted answer for accessor: participants");
+    }
+    if (next.kind === "form") {
+      return { userMessage: "", structuredAnswer: next.value };
+    }
+    if (next.kind !== "text") {
+      throw new Error("Expected text or form answer for participants");
+    }
+    return { userMessage: next.value };
+  }
+
+  if (step.type === "consent") {
+    return {
+      userMessage: "",
+      structuredAnswer: { newsletter: false, termsAccepted: true },
+    };
+  }
+
   if (step.type !== "ask") {
-    throw new Error(`Expected ask or fileUpload step, got ${step.type}`);
+    throw new Error(`Expected ask, participants, fileUpload, or consent step, got ${step.type}`);
   }
 
   const accessor = step.accessor;
@@ -256,9 +278,13 @@ async function main(): Promise<void> {
     const label =
       result.type === "form"
         ? `FORM [${result.accessor}]: ${result.title}`
-        : result.type === "fileUpload"
-          ? `UPLOAD [${result.productId}] ${result.productLabel}: ${result.question}`
-          : `ASK [${result.accessor}]: ${result.question}`;
+        : result.type === "participants"
+          ? `PARTICIPANTS [${result.accessor}]: ${result.title}`
+          : result.type === "consent"
+            ? `CONSENT [${result.accessor}]: ${result.title}`
+            : result.type === "fileUpload"
+              ? `UPLOAD [${result.productId}] ${result.productLabel}: ${result.question}`
+              : `ASK [${result.accessor}]: ${result.question}`;
     console.log(label);
     if (result.euroTotal !== undefined) {
       console.log(`  (running price: €${result.euroTotal})`);

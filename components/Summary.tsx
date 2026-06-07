@@ -1,11 +1,34 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { Loading03Icon } from "@hugeicons/core-free-icons";
 import { toast } from "sonner";
 
+import {
+  BookingSuccess,
+  referenceIdFromBookResult,
+} from "@/components/BookingSuccess";
+import { countryFlag, countryLabelWithFlag } from "@/components/country-display";
+import { FileAttachmentList } from "@/components/FileAttachmentChip";
+import {
+  bookingErrorDetailsToText,
+  formatZodIssues,
+  type BookingErrorDetails,
+} from "@/lib/booking-errors";
+import { AppointmentRequest } from "@/lib/booking-schema";
+import { sanitizeAppointmentPayload } from "@/lib/party-sanitize";
+import { ZodError } from "zod";
 import { PartyForm, TimeslotPicker, type CompleteBooking } from "@/components/Chat";
+import { ProductEditPanel } from "@/components/ProductEditPanel";
+import {
+  buildSessionFileOwnersForProductEdit,
+  mergeBookingFilesForProductEdit,
+  type ProductEditResult,
+} from "@/components/product-edit";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
 import {
   Card,
   CardContent,
@@ -16,13 +39,20 @@ import {
 } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
-import { PARTY_FORM_FIELDS, type EngineState, type EngineStep } from "@/lib/engine";
+import {
+  getPartyFormFieldsForAccessor,
+  parsePartyStructuredAnswer,
+  type EngineState,
+  type EngineStep,
+} from "@/lib/engine";
+import { getConsentConfig } from "@/lib/consent-config";
+import { autoAttachSessionFiles } from "@/lib/form-interpreter";
 import {
   buildPriceDisplay,
   centsToEuros,
 } from "@/lib/price-display";
 import { getCountryOptions } from "@/lib/form-interpreter";
-import type { PriceLineItem } from "@/lib/notarity-api";
+import type { PriceLineItem } from "@/lib/notarity";
 import {
   buildTimeslotOptions,
   formatTimeslotLabel,
@@ -32,6 +62,7 @@ type SummaryProps = {
   booking: CompleteBooking;
   onBookingUpdate: (booking: CompleteBooking) => void;
   onReask: (resume: { state: EngineState; step: EngineStep }) => void;
+  onBooked?: () => void;
 };
 
 type BookResult = {
@@ -79,6 +110,7 @@ export function Summary({
   booking,
   onBookingUpdate,
   onReask,
+  onBooked,
 }: SummaryProps): React.ReactElement {
   const { payload, lineItems, confirmedPrice, files, availableTimeslots, engineState } =
     booking;
@@ -86,11 +118,33 @@ export function Summary({
   const [submitting, setSubmitting] = useState(false);
   const [bookResult, setBookResult] = useState<BookResult | null>(null);
   const [bookError, setBookError] = useState<string | null>(null);
+  const [bookErrorDetails, setBookErrorDetails] = useState<string | null>(null);
   const [editingAccessor, setEditingAccessor] = useState<string | null>(null);
   const [editLoading, setEditLoading] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
 
+  const consentConfig = useMemo(
+    () => getConsentConfig(engineState.form, engineState.collected),
+    [engineState.collected, engineState.form],
+  );
+
+  const [newsletterOptIn, setNewsletterOptIn] = useState(
+    () => engineState.collected.newsletter ?? payload.newsletter ?? false,
+  );
+  const [termsAccepted, setTermsAccepted] = useState(
+    () => engineState.collected.termsAccepted === true,
+  );
+  const [consentError, setConsentError] = useState<string | null>(null);
+
   const priceDisplay = useMemo(() => buildPriceDisplay(lineItems), [lineItems]);
+
+  const consentBlocked =
+    consentConfig.termsRequired && termsAccepted !== true;
+
+  const fileSizes = useMemo(
+    () => Object.fromEntries(files.map((file) => [file.name, file.size])),
+    [files],
+  );
 
   const countryOptions = useMemo(
     () =>
@@ -108,16 +162,23 @@ export function Summary({
     return buildTimeslotOptions(availableTimeslots);
   }, [availableTimeslots]);
 
-  const applyEdit = async (accessor: string, value: unknown) => {
+  const applyEdit = async (
+    accessor: string,
+    value: unknown,
+    options?: { state?: EngineState; files?: File[] },
+  ) => {
     setEditLoading(true);
     setEditError(null);
+
+    const stateForEdit = options?.state ?? engineState;
+    const filesForBooking = options?.files ?? files;
 
     try {
       const response = await fetch("/api/edit", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          state: engineState,
+          state: stateForEdit,
           accessor,
           value,
         }),
@@ -138,13 +199,19 @@ export function Summary({
           payload: data.step.payload,
           lineItems: data.state.pricing?.lineItems ?? lineItems,
           confirmedPrice: data.step.payload.confirmedPrice,
-          files,
+          files: filesForBooking,
           availableTimeslots: data.state.availableTimeslots,
           engineState: data.state,
         });
         setEditingAccessor(null);
         toast.success("Updated", { description: "Summary refreshed in place." });
         return;
+      }
+
+      if (data.step.type === "fileUpload") {
+        setEditError(
+          `${data.step.productLabel} needs a document. Upload it in the chat, then return to review.`,
+        );
       }
 
       setEditingAccessor(null);
@@ -156,6 +223,27 @@ export function Summary({
     } finally {
       setEditLoading(false);
     }
+  };
+
+  const applyProductsEdit = async (result: ProductEditResult) => {
+    const mergedFiles = mergeBookingFilesForProductEdit(
+      files,
+      result.newFiles,
+      result.removedFileNames,
+    );
+    const sessionFiles = mergedFiles.map((file) => file.name);
+    const sessionFileOwners = buildSessionFileOwnersForProductEdit(
+      result.filesByProductId,
+    );
+
+    await applyEdit("products", result.products, {
+      state: {
+        ...engineState,
+        sessionFiles,
+        sessionFileOwners,
+      },
+      files: mergedFiles,
+    });
   };
 
   const timeslotLabel = useMemo(() => {
@@ -171,23 +259,69 @@ export function Summary({
   }, [availableTimeslots, payload.timeslots]);
 
   const handleBook = async () => {
+    if (consentBlocked) {
+      setConsentError("Please accept the terms and conditions before booking.");
+      return;
+    }
+
     setSubmitting(true);
     setBookError(null);
+    setBookErrorDetails(null);
+    setConsentError(null);
 
     try {
+      const syncedCollected = autoAttachSessionFiles(
+        engineState.form,
+        payload,
+        engineState.productCatalog ?? [],
+        files.map((file) => file.name),
+        engineState.sessionFileOwners ?? {},
+      );
+      const payloadWithFiles = {
+        ...payload,
+        products: syncedCollected.products ?? payload.products,
+        newsletter: consentConfig.showNewsletter
+          ? newsletterOptIn
+          : (payload.newsletter ?? false),
+      };
+
+      let validatedPayload: AppointmentRequest;
+      try {
+        validatedPayload = AppointmentRequest.parse(
+          sanitizeAppointmentPayload(payloadWithFiles),
+        );
+      } catch (error) {
+        if (error instanceof ZodError) {
+          const details: BookingErrorDetails = {
+            kind: "zod",
+            issues: formatZodIssues(error),
+          };
+          const detailsText = bookingErrorDetailsToText(details);
+          setBookError("Booking payload is invalid — fix the fields below.");
+          setBookErrorDetails(detailsText);
+          toast.error("Booking failed", {
+            description: "Payload validation failed before submit.",
+          });
+          return;
+        }
+        throw error;
+      }
+
       const formData = new FormData();
-      formData.append("payload", JSON.stringify(payload));
+      formData.append("payload", JSON.stringify(validatedPayload));
 
       for (const file of files) {
         formData.append("files", file, file.name);
       }
 
-      for (const product of payload.products) {
+      for (const product of validatedPayload.products) {
         for (const fileName of product.files) {
           if (!files.some((f) => f.name === fileName)) {
-            throw new Error(
-              `Missing upload for required file: ${fileName}. Please upload both PDFs during the chat.`,
-            );
+            const message = `Missing upload for required file: ${fileName}. Please upload the PDF during the chat.`;
+            setBookError("A required document is missing.");
+            setBookErrorDetails(message);
+            toast.error("Booking failed", { description: message });
+            return;
           }
         }
       }
@@ -197,20 +331,35 @@ export function Summary({
         body: formData,
       });
 
-      const data = (await response.json()) as BookResult & { error?: string };
+      const data = (await response.json()) as BookResult & {
+        error?: string;
+        details?: BookingErrorDetails;
+      };
 
       if (!response.ok) {
-        throw new Error(data.error ?? "Booking failed");
+        const detailsText = bookingErrorDetailsToText(data.details);
+        setBookError(
+          data.error ?? "We couldn't submit your booking. Please try again.",
+        );
+        setBookErrorDetails(detailsText);
+        toast.error("Booking failed", {
+          description: data.error ?? "See details in the summary panel.",
+        });
+        return;
       }
 
       setBookResult(data);
-      toast.success("Appointment request submitted", {
-        description: `Confirmed price: €${data.confirmedPrice.toFixed(2)} (debug mode)`,
+      onBooked?.();
+      toast.success("You're booked!", {
+        description: `€${priceDisplay.grossTotalCents ? (priceDisplay.grossTotalCents / 100).toFixed(2) : data.confirmedPrice.toFixed(2)} confirmed (debug mode)`,
       });
     } catch (error) {
       const message =
-        error instanceof Error ? error.message : "Booking failed";
-      setBookError(message);
+        error instanceof Error
+          ? error.message
+          : "We couldn't submit your booking. Please try again.";
+      setBookError("We couldn't submit your booking. Please try again.");
+      setBookErrorDetails(message);
       toast.error("Booking failed", { description: message });
     } finally {
       setSubmitting(false);
@@ -236,6 +385,11 @@ export function Summary({
               disabled={editLoading}
               onClick={() => void applyEdit(accessor, option.value)}
             >
+              {countryFlag(option.value) ? (
+                <span className="mr-1.5" aria-hidden>
+                  {countryFlag(option.value)}
+                </span>
+              ) : null}
               {option.label}
             </Button>
           ))}
@@ -273,6 +427,28 @@ export function Summary({
             Cancel
           </Button>
         </div>
+      );
+    }
+
+    if (accessor === "products") {
+      const catalog = engineState.productCatalog ?? [];
+      if (catalog.length === 0) {
+        return (
+          <p className="mt-2 text-xs text-muted-foreground">
+            Product catalog unavailable — use Back in chat.
+          </p>
+        );
+      }
+
+      return (
+        <ProductEditPanel
+          catalog={catalog}
+          currentProducts={payload.products}
+          bookingFiles={files}
+          loading={editLoading}
+          onConfirm={(result) => void applyProductsEdit(result)}
+          onCancel={() => setEditingAccessor(null)}
+        />
       );
     }
 
@@ -322,7 +498,14 @@ export function Summary({
         accessor === "billingDetails"
           ? payload.billingDetails
           : payload.shippingDetails!;
+      const partyFields = getPartyFormFieldsForAccessor(
+        engineState.form,
+        accessor,
+        engineState.collected,
+        engineState.productCatalog ?? [],
+      );
       const initialValues: Record<string, string> = {
+        business: party.business ? "true" : "false",
         firstName: party.firstName ?? "",
         lastName: party.lastName ?? "",
         email: party.email ?? "",
@@ -332,6 +515,8 @@ export function Summary({
         city: party.city ?? "",
         stateProvince: party.stateProvince ?? "",
         countryCode: party.countryCode ?? "",
+        companyName: party.businessDetails?.companyName ?? "",
+        vat: party.businessDetails?.vat ?? "",
       };
 
       return (
@@ -342,21 +527,21 @@ export function Summary({
               accessor,
               title:
                 accessor === "billingDetails" ? "Billing details" : "Shipping address",
-              fields: PARTY_FORM_FIELDS,
+              fields: partyFields,
             }}
             loading={editLoading}
             initialValues={initialValues}
             submitLabel="Save change"
             onSubmit={(values) => {
-              const structured =
+              const base =
                 accessor === "shippingDetails"
                   ? {
                       shippingDetailsSameAsBillingDetails: false,
                       ...values,
                       business: false,
                     }
-                  : { ...values, business: party.business ?? false };
-              void applyEdit(accessor, structured);
+                  : values;
+              void applyEdit(accessor, parsePartyStructuredAnswer(base));
             }}
           />
           <Button
@@ -385,28 +570,54 @@ export function Summary({
     setEditingAccessor(accessor);
   };
 
+  const referenceId = bookResult
+    ? referenceIdFromBookResult(bookResult.result)
+    : null;
+
+  if (bookResult) {
+    return (
+      <Card className="flex h-full min-h-0 flex-col shadow-sm">
+        <CardContent className="flex min-h-0 flex-1 items-center justify-center p-4 sm:p-6">
+          <BookingSuccess
+            confirmedPrice={bookResult.confirmedPrice}
+            grossTotalCents={priceDisplay.grossTotalCents}
+            destinationCountry={payload.destinationCountry}
+            countryLabel={countryLabelWithFlag(payload.destinationCountry)}
+            timeslotLabel={timeslotLabel}
+            referenceId={referenceId}
+            className="w-full"
+          />
+        </CardContent>
+      </Card>
+    );
+  }
+
   return (
-    <Card className="flex h-full min-h-[20rem] flex-col shadow-sm lg:min-h-0">
+    <Card className="flex h-full min-h-0 flex-col shadow-sm">
       <CardHeader className="border-b border-border pb-4">
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div>
-            <CardTitle>Review &amp; book</CardTitle>
-            <CardDescription>
+            <CardTitle className="text-lg font-semibold tracking-tight">
+              Review &amp; book
+            </CardTitle>
+            <CardDescription className="leading-relaxed">
               Server-priced breakdown — submit only when you&apos;re ready.
             </CardDescription>
           </div>
           <div className="flex flex-wrap gap-1.5">
-            <Badge variant="secondary">{payload.destinationCountry}</Badge>
+            <Badge variant="secondary" className="bg-primary/8">
+              {countryLabelWithFlag(payload.destinationCountry)}
+            </Badge>
             <Badge variant="outline">{payload.mode}</Badge>
           </div>
         </div>
       </CardHeader>
 
-      <CardContent className="min-h-0 flex-1 p-0">
-        <ScrollArea className="h-full max-h-[min(28rem,50dvh)] lg:max-h-none">
+      <CardContent className="flex min-h-0 flex-1 flex-col p-0">
+        <ScrollArea className="min-h-0 flex-1">
           <div className="flex flex-col gap-4 px-4 py-4">
             <section className="grid gap-3 sm:grid-cols-2">
-              <div className="rounded-xl bg-muted/60 p-3">
+              <div className="rounded-xl border border-border/60 bg-card p-3 shadow-sm">
                 <SectionHeader
                   title="Destination"
                   accessor="destinationCountry"
@@ -414,11 +625,11 @@ export function Summary({
                   editing={editingAccessor === "destinationCountry"}
                 />
                 <p className="mt-1 font-medium text-foreground">
-                  {payload.destinationCountry}
+                  {countryLabelWithFlag(payload.destinationCountry)}
                 </p>
                 {renderInlineEditor("destinationCountry")}
               </div>
-              <div className="rounded-xl bg-muted/60 p-3">
+              <div className="rounded-xl border border-border/60 bg-card p-3 shadow-sm">
                 <SectionHeader
                   title="Timeslot"
                   accessor="timeslots"
@@ -432,7 +643,7 @@ export function Summary({
               </div>
             </section>
 
-            <section className="rounded-xl bg-muted/60 p-3">
+            <section className="rounded-xl border border-border/60 bg-card p-3 shadow-sm">
               <SectionHeader
                 title="Products"
                 accessor="products"
@@ -440,6 +651,7 @@ export function Summary({
                 editing={editingAccessor === "products"}
               />
               {renderInlineEditor("products")}
+              {editingAccessor !== "products" && (
               <ul className="mt-2 space-y-2">
                 {payload.products.map((product) => (
                   <li key={product.id} className="text-sm text-foreground">
@@ -447,16 +659,19 @@ export function Summary({
                       {productLabel(product.id, lineItems)}
                     </span>
                     {product.files.length > 0 && (
-                      <span className="block text-xs text-muted-foreground">
-                        {product.files.join(", ")}
-                      </span>
+                      <FileAttachmentList
+                        filenames={product.files}
+                        fileSizes={fileSizes}
+                        className="mt-2"
+                      />
                     )}
                   </li>
                 ))}
               </ul>
+              )}
             </section>
 
-            <section className="rounded-xl bg-muted/60 p-3">
+            <section className="rounded-xl border border-border/60 bg-card p-3 shadow-sm">
               <SectionHeader
                 title="Billing contact"
                 accessor="billingDetails"
@@ -465,6 +680,13 @@ export function Summary({
               />
               {renderInlineEditor("billingDetails")}
               <p className="mt-1 text-sm leading-relaxed text-foreground">
+                {payload.billingDetails.business &&
+                payload.billingDetails.businessDetails?.companyName ? (
+                  <>
+                    {payload.billingDetails.businessDetails.companyName}
+                    <br />
+                  </>
+                ) : null}
                 {payload.billingDetails.firstName}{" "}
                 {payload.billingDetails.lastName}
                 <br />
@@ -478,7 +700,7 @@ export function Summary({
             </section>
 
             {payload.hardCopy.hardCopy && (
-              <section className="rounded-xl bg-muted/60 p-3">
+              <section className="rounded-xl border border-border/60 bg-card p-3 shadow-sm">
                 <SectionHeader
                   title="Shipping"
                   accessor="shippingDetails"
@@ -494,8 +716,8 @@ export function Summary({
               </section>
             )}
 
-            <section className="rounded-xl border border-border p-3">
-              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            <section className="rounded-xl border border-primary/15 bg-primary/5 p-4 shadow-sm">
+              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                 Price breakdown
               </p>
               {priceDisplay.lines.length > 0 ? (
@@ -525,20 +747,29 @@ export function Summary({
                   </li>
                 </ul>
               ) : (
-                <p className="mt-2 text-sm text-muted-foreground">
-                  Total confirmed from server pricing.
-                </p>
+                <div className="mt-3 space-y-2">
+                  <Skeleton className="h-4 w-full motion-reduce:animate-none" />
+                  <Skeleton className="h-4 w-3/4 motion-reduce:animate-none" />
+                  <p className="text-sm text-muted-foreground">
+                    Loading price from server…
+                  </p>
+                </div>
               )}
-              <div className="mt-4 space-y-1 border-t border-border pt-3">
-                <div className="flex items-center justify-between">
-                  <span className="font-semibold text-foreground">
-                    Total (incl. VAT)
+              <div className="mt-4 space-y-1 border-t border-primary/15 pt-3">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-base font-semibold text-foreground">
+                    Total (excl. VAT)
                   </span>
-                  <span className="text-xl font-bold tabular-nums text-primary">
+                  <span className="text-2xl font-bold tabular-nums text-primary">
                     €{centsToEuros(priceDisplay.grossTotalCents).toFixed(2)}
                   </span>
                 </div>
-                <p className="text-xs text-muted-foreground">{priceDisplay.vatNote}</p>
+                <p className="text-xs text-muted-foreground">
+                  {priceDisplay.vatNote.replace(
+                    /total incl\. VAT equals net/i,
+                    "confirmed price is net (excl. VAT)",
+                  )}
+                </p>
                 <p className="text-xs text-muted-foreground">
                   Submitted confirmed price (net): €{confirmedPrice.toFixed(2)}
                 </p>
@@ -555,10 +786,87 @@ export function Summary({
             )}
 
             {files.length > 0 && (
-              <p className="text-xs text-muted-foreground">
-                {files.length} file(s) attached:{" "}
-                {files.map((f) => f.name).join(", ")}
-              </p>
+              <section className="rounded-xl border border-border/60 bg-card p-3 shadow-sm">
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  Attached documents ({files.length})
+                </p>
+                <FileAttachmentList
+                  filenames={files.map((file) => file.name)}
+                  fileSizes={fileSizes}
+                  className="mt-2"
+                  orientation="row"
+                />
+              </section>
+            )}
+
+            {(consentConfig.showNewsletter || consentConfig.termsRequired) && (
+              <section className="rounded-xl border border-border/60 bg-card p-3 shadow-sm">
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  Consent
+                </p>
+                <div className="mt-3 space-y-3">
+                  {consentConfig.showNewsletter && (
+                    <div className="flex items-start gap-3">
+                      <input
+                        id="summary-newsletter"
+                        type="checkbox"
+                        checked={newsletterOptIn}
+                        onChange={(event) =>
+                          setNewsletterOptIn(event.target.checked)
+                        }
+                        disabled={submitting}
+                        className="mt-0.5 size-4 shrink-0 rounded border border-input accent-primary"
+                      />
+                      <Label
+                        htmlFor="summary-newsletter"
+                        className="cursor-pointer text-sm leading-relaxed text-foreground"
+                      >
+                        Subscribe to the notarity newsletter
+                      </Label>
+                    </div>
+                  )}
+                  {consentConfig.termsRequired && (
+                    <div className="flex items-start gap-3">
+                      <input
+                        id="summary-terms"
+                        type="checkbox"
+                        checked={termsAccepted}
+                        onChange={(event) => {
+                          setTermsAccepted(event.target.checked);
+                          if (event.target.checked) {
+                            setConsentError(null);
+                          }
+                        }}
+                        disabled={submitting}
+                        className="mt-0.5 size-4 shrink-0 rounded border border-input accent-primary"
+                      />
+                      <Label
+                        htmlFor="summary-terms"
+                        className="cursor-pointer text-sm leading-relaxed text-foreground"
+                      >
+                        I accept the{" "}
+                        <a
+                          href="https://notarity.com/en/terms-and-conditions"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="font-medium text-primary underline-offset-2 hover:underline"
+                          onClick={(event) => event.stopPropagation()}
+                        >
+                          terms and conditions
+                        </a>
+                      </Label>
+                    </div>
+                  )}
+                </div>
+                {consentError && (
+                  <p
+                    role="alert"
+                    className="mt-3 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+                  >
+                    {consentError}
+                  </p>
+                )}
+              </section>
             )}
 
             {bookError && (
@@ -566,48 +874,51 @@ export function Summary({
                 role="alert"
                 className="rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
               >
-                {bookError}
+                <p>{bookError}</p>
+                {bookErrorDetails && (
+                  <details className="mt-2 text-xs text-destructive/90">
+                    <summary className="cursor-pointer select-none font-medium">
+                      Details
+                    </summary>
+                    <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-md bg-destructive/5 p-2 font-mono text-[11px] leading-relaxed">
+                      {bookErrorDetails}
+                    </pre>
+                  </details>
+                )}
               </div>
             )}
 
-            {bookResult && (
-              <div className="rounded-xl border border-primary/20 bg-primary/5 px-3 py-3 text-sm">
-                <p className="font-semibold text-foreground">
-                  Submitted successfully (debug mode)
-                </p>
-                <p className="mt-1 text-muted-foreground">
-                  Confirmed price: €{bookResult.confirmedPrice.toFixed(2)}
-                </p>
-                <pre className="mt-2 max-h-36 overflow-auto rounded-lg bg-muted/60 p-2 text-xs text-muted-foreground">
-                  {JSON.stringify(bookResult.result, null, 2)}
-                </pre>
-              </div>
-            )}
           </div>
         </ScrollArea>
       </CardContent>
 
-      <CardFooter className="flex-col gap-2 border-t border-border">
+      <CardFooter className="flex-col gap-2 border-t border-border bg-card pb-[max(0.75rem,env(safe-area-inset-bottom))]">
         <Button
           type="button"
           size="lg"
-          className="w-full"
+          className="tap-press min-h-12 w-full text-base font-semibold shadow-sm"
           onClick={() => void handleBook()}
-          disabled={submitting || bookResult !== null || editingAccessor !== null}
+          disabled={submitting || editingAccessor !== null || consentBlocked}
         >
           {submitting ? (
             <span className="flex items-center gap-2">
-              <Skeleton className="size-4 rounded-full motion-reduce:animate-none" />
-              Submitting…
+              <HugeiconsIcon
+                icon={Loading03Icon}
+                strokeWidth={2}
+                className="size-5 motion-safe:animate-spin motion-reduce:animate-none"
+                aria-hidden
+              />
+              Submitting your booking…
             </span>
-          ) : bookResult ? (
-            "Submitted"
           ) : (
             "Book it"
           )}
         </Button>
         <p className="w-full text-center text-xs text-muted-foreground">
-          draft: {payload._appointmentRequestDraft}
+          Debug mode — no real emails · draft{" "}
+          <span className="font-mono text-[10px]">
+            {payload._appointmentRequestDraft}
+          </span>
         </p>
       </CardFooter>
     </Card>
