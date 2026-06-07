@@ -17,6 +17,7 @@ export const OcrPartySchema = z
     city: ocrString,
     stateProvince: ocrString,
     countryCode: ocrCountryCode,
+    companyName: ocrString,
   })
   .nullable()
   .optional();
@@ -56,6 +57,8 @@ export const OcrResponseSchema = z.object({
   productId: ocrString,
   productTitle: ocrString,
   suggestedProductId: ocrString,
+  productConfidence: z.enum(["high", "medium", "low"]).optional(),
+  productMatchReason: ocrString,
   alternativeProductIds: z.array(z.string()).optional(),
   ambiguousProduct: z.boolean().optional(),
   countryOptions: z.array(OcrCountryOptionSchema).optional(),
@@ -75,6 +78,7 @@ export type OcrParty = {
   city?: string;
   stateProvince?: string;
   countryCode?: string;
+  companyName?: string;
 };
 
 export type OcrExtracted = {
@@ -139,6 +143,8 @@ export function normalizeOcrResponse(raw: {
   productId?: unknown;
   productTitle?: unknown;
   suggestedProductId?: unknown;
+  productConfidence?: unknown;
+  productMatchReason?: unknown;
   alternativeProductIds?: unknown;
   ambiguousProduct?: unknown;
   countryOptions?: unknown;
@@ -167,6 +173,10 @@ export function normalizeOcrResponse(raw: {
     suggestedProductId: stripEmptyValue(raw.suggestedProductId) as
       | string
       | undefined,
+    productConfidence: normalizeConfidence(raw.productConfidence),
+    productMatchReason: stripEmptyValue(raw.productMatchReason) as
+      | string
+      | undefined,
     alternativeProductIds: Array.isArray(raw.alternativeProductIds)
       ? raw.alternativeProductIds
           .map((entry) => stripEmptyValue(entry))
@@ -192,4 +202,20 @@ export function normalizeOcrResponse(raw: {
 
   const cleaned = stripEmptyValue(normalized) as Record<string, unknown>;
   return OcrResponseSchema.parse(cleaned ?? {});
+}
+
+/** Strip null/empty party hints for client state (OcrParty uses undefined, not null). */
+export function normalizeOcrParty(
+  party: Record<string, unknown> | OcrParty | null | undefined,
+): OcrParty | null {
+  if (!party) {
+    return null;
+  }
+  const cleaned = stripEmptyValue({
+    ...party,
+    countryCode: normalizeCountryCode(
+      (party as OcrParty).countryCode ?? (party as Record<string, unknown>).countryCode,
+    ),
+  }) as OcrParty | undefined;
+  return cleaned ?? null;
 }

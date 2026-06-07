@@ -1,0 +1,34 @@
+{
+  "destinationCountry": "AT",
+  "destinationCountryLabel": "Austria",
+  "productHint": "Gesellschaftsvertrag",
+  "purposeHint": "FlexCo incorporation for Midgley Tech Ltd",
+  "productId": "S3N2zyJENFE0vTjrKTZn",
+  "productTitle": "FlexCo Incorporation",
+  "suggestedProductId": "S3N2zyJENFE0vTjrKTZn",
+  "productConfidence": "high",
+  "productMatchReason": "Catalog match on \"FlexCo Incorporation\"",
+  "countryOptions": [
+    { "code": "AT", "label": "Austria" },
+    { "code": "ES", "label": "Spain" }
+  ],
+  "productOptions": [
+    { "id": "S3N2zyJENFE0vTjrKTZn", "title": "FlexCo Incorporation" },
+    { "id": "obYErsteOOFvHQtPD7ZV", "title": "GmbH incoorporation" },
+    { "id": "Hcn6OVIEa57bUwdOgfJ5", "title": "Signature Notarisation" }
+  ],
+  "extracted": {
+    "documentType": "Gesellschaftsvertrag",
+    "summary": "Articles of association for Midgley Tech EU FlexCo incorporation in Austria",
+    "party": {
+      "firstName": "Elizabeth",
+      "lastName": "Midgley",
+      "email": "elizabeth.midgley@notarity.com",
+      "address": "Finsbury Square 14",
+      "city": "London",
+      "countryCode": "GB",
+      "companyName": "Midgley Tech Ltd"
+    }
+  },
+  "confidence": "high"
+}

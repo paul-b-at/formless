@@ -1,0 +1,26 @@
+{
+  "destinationCountry": "LT",
+  "destinationCountryLabel": "Lithuania",
+  "productHint": "Power of Attorney",
+  "purposeHint": "representing shareholding interests at a shareholders' meeting",
+  "productId": "ujwBkZleJLPEzByCnPCS",
+  "productTitle": "Signature notarisation",
+  "suggestedProductId": "ujwBkZleJLPEzByCnPCS",
+  "productConfidence": "high",
+  "productMatchReason": "Instrument type matches \"Signature notarisation\"",
+  "extracted": {
+    "party": {
+      "firstName": "Robert",
+      "lastName": "Stevens",
+      "address": "Savanorių pr. 120",
+      "zipCode": "44148",
+      "city": "Kaunas",
+      "stateProvince": "Kauno apskr.",
+      "countryCode": "LT"
+    },
+    "documentType": "Special Power of Attorney",
+    "summary": "A special power of attorney authorizing Elena Petrova to represent Robert Stevens at the Extraordinary Shareholders' Meeting of Baltic Tech Solutions UAB."
+  },
+  "confidence": "high",
+  "sourceFileName": "Robert_Stevens_sample_case.pdf"
+}

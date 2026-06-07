@@ -1,94 +1,116 @@
 # Formless Notarity MCP Server
 
-This MCP server exposes the existing Formless Notarity booking flow as stdio tools for agents. It uses the repo's booking engine and Notarity API helpers instead of duplicating booking or pricing logic.
+Stdio MCP tools over the **same** Formless stack as the web app:
 
-The default booking form slug is `start-vienna-hackathon`. Sessions are stored in memory with `Map<sessionId, EngineState>`, which is enough for hackathon/debug use.
+- **Engine:** `advance()` in `lib/engine.ts` (form walk, Gemini extraction, zod merge, `/price` refresh)
+- **Interpreter:** `parseBookingForm`, `nextUnfilled`, `applyAnswer`, `evaluateCondition` in `lib/form-interpreter.ts`
+- **Notarity client:** `getBookingForm`, `priceRequest`, `submitRequest`, `sumNetToEuros` in `lib/notarity.ts`
+
+No duplicated condition evaluation or price logic lives in `mcp/` — only thin session wiring in `mcp/booking-session.ts`.
+
+Default booking form slug: `start-vienna-hackathon`. Sessions are **in-memory** (`Map<sessionId, EngineState>`); restarting the process loses state.
 
 ## Requirements
 
 - `bun install`
-- `.env.local` with server-side values:
-  - `GEMINI_API_KEY`
-  - `NOTARITY_API_BASE`
+- `.env.local` with `GEMINI_API_KEY` (and optional `NOTARITY_API_BASE`)
+- Demo PDFs in `notarity-reference/` for `submit_booking` (not needed for `get_price` / replay pricing)
 
-Do not commit `.env.local` or print secret values.
+Do not commit `.env.local` or print secret values. **No Notarity API key** is required for staging.
 
 ## Run
 
 ```bash
-bun run mcp/server.ts
+bun run mcp
+# equivalent: bun run mcp/server.ts
 ```
 
-All diagnostics go to stderr. stdout is reserved for MCP JSON-RPC.
+Diagnostics go to **stderr**. stdout is reserved for MCP JSON-RPC.
 
-TODO: add a root `mcp` script later, for example `bun run mcp`, when the parallel-safety restriction on editing `package.json` is lifted.
+Verify the adapter without an MCP client:
+
+```bash
+bun run mcp-replay
+```
 
 ## Tools
 
-1. `start_booking({ slug? })`
-   - Loads the booking form, bootstraps an engine state, creates a `sessionId`, and returns the first assistant question plus a structured state summary.
+### `start_booking({ slug? })`
 
-2. `answer({ sessionId, userMessage })`
-   - Sends the user's answer into the existing engine, stores the updated state, and returns the assistant message, collected fields, missing fields, and completion status.
+Loads the live form via `getBookingForm` → `parseBookingForm`, bootstraps `EngineState`, calls `advance(state, "")`, returns `sessionId` + `structuredContent.step`.
 
-3. `get_price({ sessionId })`
-   - Uses the current collected payload and the existing Notarity pricing helper. Price comes from the Notarity API; the server does not invent pricing rules.
+### `answer({ sessionId, userMessage, uploadProductId?, uploadKind? })`
 
-4. `submit_booking({ sessionId, confirm })`
-   - Submits only when `confirm === true`.
-   - Forces `mode: "debug"` while testing.
-   - Uses the existing safe draft id when the engine has added it.
-   - Attaches local files from `notarity-reference/` when product file names are present in the collected payload.
+Calls `advance()` with the stored session state.
 
-Submit can send real emails. Keep debug mode while testing.
+**Per-product files (Hotfix #5):** when `step.type === "fileUpload"`, pass:
 
-## Example Sequence
+```json
+{
+  "uploadKind": "file",
+  "uploadProductId": "<productId from step>",
+  "userMessage": "nie_personal_details.pdf"
+}
+```
+
+This binds the filename only to that product's `products[i].files`. Filenames sent on email/party/text steps are **rejected** by the engine (re-ask).
+
+**Intentional limits:**
+
+- Text + optional `uploadKind`/`uploadProductId` only — no `structuredAnswer` for inline party forms (agents answer billing/shipping as natural language or JSON strings parsed by Gemini).
+- Prefer `structuredContent.step` over human `content` text for `fileUpload` / `form` steps.
+
+### `get_price({ sessionId })`
+
+Validates collected state with zod, then `priceRequest()` + `sumNetToEuros()`. Joshua/Spain → **€580**.
+
+### `submit_booking({ sessionId, confirm })`
+
+| `confirm` | Behaviour |
+|-----------|-----------|
+| `false` | **Dry-run preview** — parsed payload + line items + price. **No submit.** |
+| `true` | Submits via `submitRequest()` with `mode: "debug"`, draft id `vfniS9nfoq8nMpRqQj7Z`, PDF bytes from `notarity-reference/<filename>`. |
+
+Submit can send real emails even in debug — only call `confirm: true` after explicit user approval.
+
+## Example sequence
 
 ```text
 start_booking({})
 answer({ sessionId, userMessage: "ES" })
 answer({ sessionId, userMessage: "NIE number application" })
-answer({ sessionId, userMessage: "nie-application-demo-joshua_timms.pdf" })
-answer({ sessionId, userMessage: "nie_personal_details.pdf" })
+answer({ sessionId, userMessage: "nie-application-demo-joshua_timms.pdf", uploadKind: "file", uploadProductId: "UpEJ7raQEKQKFhWn12r2" })
+answer({ sessionId, userMessage: "nie_personal_details.pdf", uploadKind: "file", uploadProductId: "xK5IkgPX1LTYdWLFzW8X" })
 answer({ sessionId, userMessage: "joshua.timms@notarity.com" })
-answer({ sessionId, userMessage: "<timeslot id from options>" })
-answer({ sessionId, userMessage: "<billing JSON>" })
+answer({ sessionId, userMessage: "<timeslot id from step.options>" })
+answer({ sessionId, userMessage: "<billing as text or JSON>" })
 answer({ sessionId, userMessage: "yes hard copy please" })
-answer({ sessionId, userMessage: "<shipping JSON>" })
+answer({ sessionId, userMessage: "<shipping as text or JSON>" })
 get_price({ sessionId })
-submit_booking({ sessionId, confirm: true })
+submit_booking({ sessionId, confirm: false })   # dry-run preview
+submit_booking({ sessionId, confirm: true })    # only after user confirms
 ```
 
-For the Joshua/Spain debug flow, `get_price` should return `€580` before submit.
+## Registration
 
-## Claude Code Registration
-
-From the repo root:
+**Claude Code** (repo root):
 
 ```bash
-claude mcp add formless-notarity -- bun run mcp/server.ts
+claude mcp add formless-notarity -- bun run mcp
 ```
 
-Then restart Claude Code or reload MCP servers.
-
-## Cursor Registration
-
-Add this to your Cursor MCP config:
+**Cursor** — set `cwd` to your clone:
 
 ```json
 {
   "mcpServers": {
     "formless-notarity": {
       "command": "bun",
-      "args": ["run", "mcp/server.ts"],
-      "cwd": "/Users/hayatoener/formless"
+      "args": ["run", "mcp"],
+      "cwd": "/path/to/formless"
     }
   }
 }
 ```
 
-Restart Cursor or reload MCP servers after saving the config.
-
-## TODOs
-
-- Add a root `mcp` package script once edits outside `mcp/` and `skills/` are allowed again.
+Agent skill: `skills/notarity-booking/SKILL.md`.

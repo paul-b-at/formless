@@ -44,6 +44,16 @@ async function loadProductCatalog(
   const raw = await getProductsByTags(tags);
   return raw.map((product) => {
     const record = product as Record<string, unknown>;
+    const description =
+      typeof record.description === "object" && record.description !== null
+        ? {
+            en: String(
+              (record.description as Record<string, unknown>).en ?? "",
+            ).trim(),
+          }
+        : typeof record.description === "string" && record.description.trim()
+          ? { en: record.description.trim() }
+          : undefined;
     return {
       id: String(record.id ?? record._id ?? ""),
       title: {
@@ -52,6 +62,8 @@ async function loadProductCatalog(
             ? String((record.title as Record<string, unknown>).en ?? "")
             : String(record.title ?? record.name ?? record.id ?? ""),
       },
+      description:
+        description?.en && description.en.length > 0 ? description : undefined,
       apostilleRequired: Boolean(record.apostilleRequired),
       fileUploadRequired: Boolean(record.fileUploadRequired),
     };
@@ -95,6 +107,10 @@ async function optionsForComponent(
     return [
       { label: "Yes, send a hard copy", value: "Yes, send a hard copy" },
       { label: "No hard copy needed", value: "No hard copy needed" },
+      {
+        label: "Express shipping only, no hard copy",
+        value: "Express shipping only, no hard copy",
+      },
     ];
   }
 

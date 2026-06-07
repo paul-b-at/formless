@@ -15,6 +15,7 @@ import {
 } from "../lib/engine";
 import { parseBookingForm } from "../lib/form-interpreter";
 import { readOcrCache } from "../lib/ocr-cache";
+import { describeRememberedEmailPrefill } from "../lib/remembered-email";
 import { getBookingForm, priceRequest, sumNetToEuros } from "../lib/notarity";
 
 const ROBERT_EMAIL = "robert.stevens@notarity.com";
@@ -51,6 +52,12 @@ const answerQueues: Record<string, ScriptedAnswer[]> = {
   hardCopy: [{ kind: "text", value: "No hard copy needed" }],
 };
 
+function tomorrowIsoDate(): string {
+  const date = new Date();
+  date.setUTCDate(date.getUTCDate() + 1);
+  return date.toISOString().slice(0, 10);
+}
+
 function nextScriptedAnswer(
   step: EngineStep,
   state: EngineState,
@@ -62,13 +69,6 @@ function nextScriptedAnswer(
       throw new Error(`No form answer for accessor: ${step.accessor}`);
     }
     return { userMessage: "", structuredAnswer: next.value };
-  }
-
-  if (step.type === "consent") {
-    return {
-      userMessage: "",
-      structuredAnswer: { termsAccepted: true, newsletter: false },
-    };
   }
 
   if (step.type === "fileUpload") {
@@ -92,18 +92,23 @@ function nextScriptedAnswer(
     return { userMessage: next.value };
   }
 
-  if (step.type === "consent") {
+  if (step.type === "datePicker") {
     return {
       userMessage: "",
-      structuredAnswer: { newsletter: false, termsAccepted: true },
+      structuredAnswer: { date: tomorrowIsoDate() },
     };
   }
 
   if (step.type !== "ask") {
-    throw new Error(`Expected ask, participants, consent, or form step, got ${step.type}`);
+    throw new Error(
+      `Expected ask, participants, form, or datePicker step, got ${step.type}`,
+    );
   }
 
   const accessor = step.accessor;
+  if (accessor === "preferredNotary") {
+    return { userMessage: "No preference" };
+  }
   if (accessor === "timeslots") {
     const slots = state.availableTimeslots ?? [];
     const preferred = slots.find((slot) => slot.id === ROBERT_TIMESLOT_ID);
@@ -138,6 +143,9 @@ function assertRobertPayload(payload: AppointmentRequest): void {
   }
 
   const participant = parsed.participants[0];
+  if (!participant) {
+    throw new Error("Expected one participant row");
+  }
   if (participant.email !== ROBERT_EMAIL) {
     throw new Error(`Expected participant ${ROBERT_EMAIL}, got ${participant.email}`);
   }
@@ -215,8 +223,16 @@ async function main(): Promise<void> {
     );
   }
   console.log(
-    `OCR mock: country=${ocr.destinationCountry ?? "—"} product=${ocr.productTitle ?? ocr.productHint ?? "—"}\n`,
+    `OCR mock: country=${ocr.destinationCountry ?? "—"} suggestedProductId=${ocr.suggestedProductId ?? ocr.productId ?? "—"} confidence=${ocr.productConfidence ?? "—"}\n`,
   );
+  for (const line of describeRememberedEmailPrefill(ROBERT_EMAIL, [
+    "participants[0].email",
+    "billingDetails.email",
+    "contactDetails.email",
+  ])) {
+    console.log(`Remembered email prefill: ${line}`);
+  }
+  console.log("");
 
   const rawForm = await getBookingForm("start-vienna-hackathon");
   const form = parseBookingForm(rawForm);
@@ -279,9 +295,13 @@ async function main(): Promise<void> {
     const label =
       result.type === "form"
         ? `FORM [${result.accessor}]: ${result.title}`
-        : result.type === "fileUpload"
-          ? `UPLOAD [${result.productId}] ${result.productLabel}: ${result.question}`
-          : `ASK [${result.accessor}]: ${result.question}`;
+        : result.type === "participants"
+          ? `PARTICIPANTS [${result.accessor}]: ${result.title}`
+          : result.type === "fileUpload"
+            ? `UPLOAD [${result.productId}] ${result.productLabel}: ${result.question}`
+            : result.type === "datePicker"
+              ? `DATE [${result.accessor}]: ${result.title}`
+              : `ASK [${result.accessor}]: ${result.question}`;
     console.log(label);
     if (result.euroTotal !== undefined) {
       console.log(`  (running price: €${result.euroTotal})`);

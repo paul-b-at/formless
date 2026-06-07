@@ -4,8 +4,14 @@ import {
   applyAnswer,
   autoAttachSessionFiles,
   evaluateCondition,
+  getDestinationCountryConfig,
+  getSupportedDestinationCountryCodes,
+  getTimeslotLabel,
+  getVisibleProductPickerTags,
+  isDestinationCountrySupported,
   nextUnfilled,
   parseBookingForm,
+  resolveDestinationCountryInput,
   resolveFileUploadProductId,
   validateFileForProductUpload,
   visibleComponents,
@@ -232,6 +238,86 @@ describe("nextUnfilled", () => {
     expect(next?.props?.tags).toContain("HdippWIH77AdMywneldY");
   });
 
+  test("supported destination list includes generic-else countries like LT", () => {
+    const supported = getSupportedDestinationCountryCodes(fixtureForm);
+    expect(supported).toContain("AT");
+    expect(supported).toContain("ES");
+    expect(supported).toContain("LT");
+    expect(supported.length).toBeGreaterThan(2);
+  });
+
+  test("LT resolves via generic else branch (Robert path)", () => {
+    expect(isDestinationCountrySupported(fixtureForm, "LT")).toBe(true);
+    expect(resolveDestinationCountryInput("Lithuania (LT)", fixtureForm)).toBe(
+      "LT",
+    );
+    const tags = getVisibleProductPickerTags(fixtureForm, {
+      destinationCountry: "LT",
+    });
+    expect(tags).toEqual(["t7t78Pbrs5nEyHTqDuQv"]);
+    const collected = {
+      destinationCountry: "LT",
+      products: [
+        {
+          id: "ujwBkZleJLPEzByCnPCS",
+          apostille: null,
+          userInput: "",
+          documentsNotReadyYet: false,
+          needHelpDrafting: false,
+          proofOfRepresentation: null,
+          files: [],
+        },
+      ],
+      participants: [
+        { email: "robert.stevens@notarity.com", client: true, supervisor: false },
+      ],
+    };
+    expect(getTimeslotLabel(fixtureForm, collected)).toBe(
+      "29sfIoZ9WgFQl8XjbKPu",
+    );
+  });
+
+  test("unsupported explicit-only country is rejected", () => {
+    const explicitOnly = parseBookingForm({
+      id: "test",
+      pages: [
+        {
+          title: { en: "P" },
+          slug: "p",
+          components: [
+            {
+              id: "country",
+              type: "countryPicker",
+              accessor: "destinationCountry",
+            },
+            {
+              id: "es-only",
+              type: "condition",
+              props: {
+                condition: "EQUAL",
+                compare: "destinationCountry",
+                value: "ES",
+                components: [
+                  {
+                    id: "es-products",
+                    type: "productPicker",
+                    props: { tags: ["tag-es"] },
+                    accessor: "products",
+                  },
+                ],
+                elseComponents: [],
+              },
+            },
+          ],
+        },
+      ],
+    });
+    expect(getDestinationCountryConfig(explicitOnly).allowsOtherCountries).toBe(
+      false,
+    );
+    expect(isDestinationCountrySupported(explicitOnly, "LT")).toBe(false);
+  });
+
   test("non-AT timeslot label visible for Spain", () => {
     const collected = {
       destinationCountry: "ES",
@@ -451,6 +537,39 @@ describe("nextUnfilled", () => {
       expect(result.message).toContain("already attached");
       expect(result.message).toContain("NIE Personal Data");
     }
+  });
+
+  test("autoAttachSessionFiles attaches optional showFileUpload product when owner is set", () => {
+    const flexCoId = "S3N2zyJENFE0vTjrKTZn";
+    const flexCoCatalog: ProductDefinition[] = [
+      {
+        id: flexCoId,
+        title: { en: "FlexCo Incorporation" },
+        fileUploadRequired: false,
+        showFileUpload: true,
+        apostilleRequired: false,
+      },
+    ];
+    const flexCoFile = "Gesellschaftsvertrag_Midgley_Tech_EU_FlexCo.pdf";
+
+    let collected = applyAnswer(
+      fixtureForm,
+      { destinationCountry: "AT" },
+      { type: "productPicker", id: "pp", accessor: "products" },
+      flexCoId,
+      flexCoCatalog,
+    );
+
+    collected = autoAttachSessionFiles(
+      fixtureForm,
+      collected,
+      flexCoCatalog,
+      [flexCoFile],
+      { [flexCoFile]: flexCoId },
+    );
+
+    const flexCo = collected.products?.find((product) => product.id === flexCoId);
+    expect(flexCo?.files).toEqual([flexCoFile]);
   });
 
   test("autoAttachSessionFiles does not cross-assign application pdf to NIE Personal Data", () => {

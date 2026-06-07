@@ -12,10 +12,12 @@ import {
 import { toast } from "sonner";
 
 import { ChatMessageBubble } from "@/components/ChatMessageBubble";
-import { ConsentForm } from "@/components/ConsentForm";
 import { CountrySearchSelect } from "@/components/CountrySearchSelect";
 import { rankOcrCountrySuggestions } from "@/components/ocr-country-suggestions";
-import { InlineFileUploadCard } from "@/components/InlineFileUploadCard";
+import {
+  InlineFileUploadCard,
+  type UploadContentWarning,
+} from "@/components/InlineFileUploadCard";
 import {
   countryFlag,
   extractCountryCodeFromOption,
@@ -59,8 +61,18 @@ import {
   isPartyFormValid,
   validatePartyFormFields,
 } from "@/components/party-form-validation";
+import { detectOcrContentMismatch } from "@/lib/ocr-content-mismatch";
 import { formatOcrSummary } from "@/lib/ocr-summary";
-import type { OcrResponse } from "@/lib/ocr-types";
+import {
+  hasOcrProductSuggestion,
+  sortProductOptionsWithSuggestion,
+} from "@/lib/ocr-product-map";
+import {
+  buildPartyFormPrefill,
+  primaryParticipantEmailSuggestion,
+} from "@/lib/ocr-party-prefill";
+import { captureRememberedEmail } from "@/lib/remembered-email";
+import { normalizeOcrParty, type OcrParty, type OcrResponse } from "@/lib/ocr-types";
 import {
   formatTimeslotTimeOnly,
   groupTimeslotOptionsByDay,
@@ -80,13 +92,15 @@ export type CompleteBooking = {
   engineState: EngineState;
 };
 
+type DatePickerStep = Extract<EngineStep, { type: "datePicker" }>;
+
 type ChatSnapshot = {
   engineState: EngineState | null;
   messages: ChatMessage[];
   options: StepOption[] | undefined;
   formStep: FormStep | null;
   participantsStep: ParticipantsStep | null;
-  consentStep: ConsentStep | null;
+  datePickerStep: DatePickerStep | null;
   fileUploadStep: FileUploadStep | null;
   currentAccessor: string | undefined;
   runningPrice: number | undefined;
@@ -111,8 +125,60 @@ type ChatResponse = {
 
 type FormStep = Extract<EngineStep, { type: "form" }>;
 type ParticipantsStep = Extract<EngineStep, { type: "participants" }>;
-type ConsentStep = Extract<EngineStep, { type: "consent" }>;
 type FileUploadStep = Extract<EngineStep, { type: "fileUpload" }>;
+
+function AppointmentDatePicker({
+  step,
+  loading,
+  onSubmit,
+}: {
+  step: DatePickerStep;
+  loading: boolean;
+  onSubmit: (date: string) => void;
+}): React.ReactElement {
+  const [date, setDate] = useState(step.minDate);
+
+  return (
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (date) {
+          onSubmit(date);
+        }
+      }}
+      className="flex w-full min-w-0 max-w-full flex-col gap-3 rounded-2xl border border-border bg-card p-4 shadow-sm"
+    >
+      <p className="text-sm font-medium">{step.title}</p>
+      {step.error ? (
+        <p className="text-sm text-destructive">{step.error}</p>
+      ) : null}
+      <div className="flex min-w-0 flex-col gap-1.5">
+        <Label htmlFor="appointment-date" className="text-xs">
+          Preferred date
+        </Label>
+        <Input
+          id="appointment-date"
+          type="date"
+          value={date}
+          min={step.minDate}
+          max={step.maxDate}
+          disabled={loading}
+          required
+          className="min-w-0 max-w-xs"
+          onChange={(event) => setDate(event.target.value)}
+        />
+      </div>
+      <Button
+        type="submit"
+        size="sm"
+        className="w-full sm:w-auto"
+        disabled={loading || !date}
+      >
+        Use this date
+      </Button>
+    </form>
+  );
+}
 
 type AddressSuggestion = {
   label: string;
@@ -128,6 +194,7 @@ function AddressAutocompleteInput({
   value,
   disabled,
   required,
+  inputClassName,
   onChange,
   onSelect,
 }: {
@@ -135,6 +202,7 @@ function AddressAutocompleteInput({
   value: string;
   disabled: boolean;
   required?: boolean;
+  inputClassName?: string;
   onChange: (value: string) => void;
   onSelect: (suggestion: AddressSuggestion) => void;
 }): React.ReactElement {
@@ -191,7 +259,7 @@ function AddressAutocompleteInput({
         value={value}
         disabled={disabled}
         autoComplete="street-address"
-        className="min-w-0"
+        className={cn("min-w-0", inputClassName)}
         onChange={(event) => {
           onChange(event.target.value);
           setOpen(true);
@@ -304,6 +372,19 @@ function OcrConfirmPanel({
     Boolean(ocr.productOptions?.length) &&
     (countryConfirmed || !showCountryStep);
 
+  const suggestedProductId = hasOcrProductSuggestion(ocr)
+    ? (ocr.suggestedProductId ?? undefined)
+    : undefined;
+
+  const sortedProductOptions = useMemo(
+    () =>
+      sortProductOptionsWithSuggestion(
+        ocr.productOptions ?? [],
+        suggestedProductId,
+      ),
+    [ocr.productOptions, suggestedProductId],
+  );
+
   return (
     <div className="step-enter flex min-w-0 flex-col gap-3 rounded-2xl border border-primary/15 bg-primary/5 p-4">
       {showCountryStep && (
@@ -375,32 +456,38 @@ function OcrConfirmPanel({
         </div>
       )}
 
-      {showProducts && ocr.productOptions && (
+      {showProducts && sortedProductOptions.length > 0 && (
         <div className="flex min-w-0 flex-col gap-2">
           <p className="text-sm font-medium text-foreground">Booking product</p>
-          <div className="flex flex-wrap gap-2">
-            {ocr.productOptions.map((product) => {
-              const isSuggested = product.id === ocr.suggestedProductId;
-              const isAlternative = ocr.alternativeProductIds?.includes(
-                product.id,
-              );
+          <ul className="flex min-w-0 flex-col gap-1">
+            {sortedProductOptions.map((product) => {
+              const isSuggested = product.id === suggestedProductId;
               return (
-                <Button
-                  key={product.id}
-                  type="button"
-                  size="sm"
-                  variant={isSuggested ? "default" : "outline"}
-                  disabled={loading}
-                  className="h-auto min-w-0 max-w-full whitespace-normal py-1.5 text-left"
-                  onClick={() => onProduct(product)}
-                >
-                  {product.title}
-                  {isSuggested ? " · suggested" : ""}
-                  {isAlternative ? " · also possible" : ""}
-                </Button>
+                <li key={product.id} role="presentation">
+                  <button
+                    type="button"
+                    disabled={loading}
+                    className={cn(
+                      "flex w-full min-w-0 items-center gap-2 rounded-lg border px-3 py-2 text-left text-sm transition-colors disabled:opacity-50",
+                      isSuggested
+                        ? "border-primary/30 bg-primary/10 text-foreground hover:bg-primary/15"
+                        : "border-border/80 bg-card text-foreground hover:bg-primary/8",
+                    )}
+                    onClick={() => onProduct(product)}
+                  >
+                    <span className="min-w-0 flex-1 whitespace-normal">
+                      {product.title}
+                    </span>
+                    {isSuggested ? (
+                      <span className="shrink-0 text-xs font-medium text-primary">
+                        Suggested
+                      </span>
+                    ) : null}
+                  </button>
+                </li>
               );
             })}
-          </div>
+          </ul>
         </div>
       )}
 
@@ -436,10 +523,12 @@ function countryQuickReplyValue(
 function DocumentUploadZone({
   disabled,
   busy,
+  hardError,
   onFile,
 }: {
   disabled: boolean;
   busy: boolean;
+  hardError?: string | null;
   onFile: (file: File) => void;
 }): React.ReactElement {
   const [dragOver, setDragOver] = useState(false);
@@ -476,13 +565,21 @@ function DocumentUploadZone({
       <span className="text-2xl" aria-hidden>
         📄
       </span>
+      {hardError ? (
+        <div
+          role="alert"
+          className="w-full max-w-sm rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2.5 text-sm text-destructive"
+        >
+          {hardError}
+        </div>
+      ) : null}
       <div className="space-y-1">
         <p className="text-sm font-medium text-foreground">
           {busy ? "Reading your document…" : "Start with your document"}
         </p>
         <p className="max-w-[18rem] text-xs text-muted-foreground">
-          Drop a PDF or image here and we&apos;ll infer the country and document
-          type to speed up booking.
+          Drop a PDF here and we&apos;ll infer the country and document type to
+          speed up booking (max 10 MB).
         </p>
       </div>
       {busy ? (
@@ -504,7 +601,7 @@ function DocumentUploadZone({
       <input
         ref={inputRef}
         type="file"
-        accept="application/pdf,.pdf,image/jpeg,image/png,image/webp"
+        accept="application/pdf,.pdf"
         className="hidden"
         disabled={disabled || busy}
         onChange={(event) => {
@@ -732,12 +829,17 @@ export function PartyForm({
   loading,
   onSubmit,
   initialValues,
+  suggestedFields,
+  suggestedFieldLabels,
   submitLabel = "Save details",
 }: {
   step: FormStep;
   loading: boolean;
   onSubmit: (values: Record<string, string>) => void;
   initialValues?: Record<string, string>;
+  /** Prefilled fields — shown with subtle suggestion styling. */
+  suggestedFields?: string[];
+  suggestedFieldLabels?: Record<string, string>;
   submitLabel?: string;
 }): React.ReactElement {
   const [values, setValues] = useState<Record<string, string>>(() =>
@@ -750,6 +852,10 @@ export function PartyForm({
   );
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [touched, setTouched] = useState<Record<string, boolean>>({});
+  const suggestedFieldSet = useMemo(
+    () => new Set(suggestedFields ?? []),
+    [suggestedFields],
+  );
 
   const formValid = useMemo(
     () => isPartyFormValid(values, step.fields),
@@ -869,20 +975,32 @@ export function PartyForm({
               field.name === "address" && "sm:col-span-2",
             )}
           >
-            <Label htmlFor={`${step.accessor}-${field.name}`} className="text-xs">
-              {field.label}
-              {(field.required ||
-                (field.name === "companyName" &&
-                  isBusinessBillingSelected(values))) ? (
-                " *"
+            <div className="flex min-w-0 items-center gap-2">
+              <Label htmlFor={`${step.accessor}-${field.name}`} className="text-xs">
+                {field.label}
+                {(field.required ||
+                  (field.name === "companyName" &&
+                    isBusinessBillingSelected(values))) ? (
+                  " *"
+                ) : null}
+              </Label>
+              {suggestedFieldSet.has(field.name) ? (
+                <span className="text-[10px] font-medium text-primary">
+                  {suggestedFieldLabels?.[field.name] ?? "From your document"}
+                </span>
               ) : null}
-            </Label>
+            </div>
             {field.name === "address" ? (
               <AddressAutocompleteInput
                 id={`${step.accessor}-${field.name}`}
                 required={field.required}
                 value={values[field.name] ?? ""}
                 disabled={loading}
+                inputClassName={
+                  suggestedFieldSet.has(field.name)
+                    ? "border-primary/30 bg-primary/5"
+                    : undefined
+                }
                 onChange={(next) => handleChange(field, next)}
                 onSelect={applyAddressSuggestion}
               />
@@ -927,6 +1045,8 @@ export function PartyForm({
                       phoneFlagOrPlaceholder(values[field.name] ?? "")
                       ? "pl-10"
                       : undefined,
+                    suggestedFieldSet.has(field.name) &&
+                      "border-primary/30 bg-primary/5",
                   )}
                 />
               </div>
@@ -962,7 +1082,7 @@ function snapshotFromClient(args: {
   options: StepOption[] | undefined;
   formStep: FormStep | null;
   participantsStep: ParticipantsStep | null;
-  consentStep: ConsentStep | null;
+  datePickerStep: DatePickerStep | null;
   fileUploadStep: FileUploadStep | null;
   currentAccessor: string | undefined;
   runningPrice: number | undefined;
@@ -991,7 +1111,9 @@ export function Chat({
   const [formStep, setFormStep] = useState<FormStep | null>(null);
   const [participantsStep, setParticipantsStep] =
     useState<ParticipantsStep | null>(null);
-  const [consentStep, setConsentStep] = useState<ConsentStep | null>(null);
+  const [datePickerStep, setDatePickerStep] = useState<DatePickerStep | null>(
+    null,
+  );
   const [fileUploadStep, setFileUploadStep] = useState<FileUploadStep | null>(
     null,
   );
@@ -1005,7 +1127,21 @@ export function Chat({
   const [finished, setFinished] = useState(false);
   const [historyDepth, setHistoryDepth] = useState(0);
   const [docSeedComplete, setDocSeedComplete] = useState(false);
+  const [ocrPartyPrefill, setOcrPartyPrefill] = useState<OcrParty | null>(null);
+  const [rememberedEmail, setRememberedEmail] = useState<string | null>(null);
   const [ocrReading, setOcrReading] = useState(false);
+  const [docUploadHardError, setDocUploadHardError] = useState<string | null>(
+    null,
+  );
+  const [engineUploadChecking, setEngineUploadChecking] = useState(false);
+  const [engineUploadHardError, setEngineUploadHardError] = useState<
+    string | null
+  >(null);
+  const [engineUploadWarning, setEngineUploadWarning] =
+    useState<UploadContentWarning | null>(null);
+  const [pendingEngineUpload, setPendingEngineUpload] = useState<File | null>(
+    null,
+  );
   const [pendingOcr, setPendingOcr] = useState<{
     result: OcrResponse;
     file: File;
@@ -1018,7 +1154,7 @@ export function Chat({
   const lastMessageRef = useRef<HTMLDivElement>(null);
   const formStepRef = useRef<HTMLDivElement>(null);
   const participantsStepRef = useRef<HTMLDivElement>(null);
-  const consentStepRef = useRef<HTMLDivElement>(null);
+  const datePickerStepRef = useRef<HTMLDivElement>(null);
   const timeslotStepRef = useRef<HTMLDivElement>(null);
   const fileUploadStepRef = useRef<HTMLDivElement>(null);
   const ocrPanelRef = useRef<HTMLDivElement>(null);
@@ -1038,7 +1174,7 @@ export function Chat({
       options,
       formStep,
       participantsStep,
-      consentStep,
+      datePickerStep,
       fileUploadStep,
       currentAccessor,
       runningPrice,
@@ -1051,7 +1187,7 @@ export function Chat({
     options,
     formStep,
     participantsStep,
-    consentStep,
+    datePickerStep,
     fileUploadStep,
     currentAccessor,
     runningPrice,
@@ -1068,7 +1204,7 @@ export function Chat({
       setOptions(snapshot.options);
       setFormStep(snapshot.formStep);
       setParticipantsStep(snapshot.participantsStep);
-      setConsentStep(snapshot.consentStep);
+      setDatePickerStep(snapshot.datePickerStep);
       setFileUploadStep(snapshot.fileUploadStep);
       setCurrentAccessor(snapshot.currentAccessor);
       setRunningPrice(snapshot.runningPrice);
@@ -1115,7 +1251,7 @@ export function Chat({
         setOptions(undefined);
         setFormStep(null);
         setParticipantsStep(null);
-        setConsentStep(null);
+        setDatePickerStep(null);
         setFileUploadStep(null);
         setCurrentAccessor(undefined);
         setRunningPrice(undefined);
@@ -1133,7 +1269,7 @@ export function Chat({
       if (response.step.type === "form") {
         setFormStep(response.step);
         setParticipantsStep(null);
-        setConsentStep(null);
+        setDatePickerStep(null);
         setFileUploadStep(null);
         setCurrentAccessor(response.step.accessor);
         setOptions(undefined);
@@ -1145,7 +1281,7 @@ export function Chat({
             options: undefined,
             formStep: response.step,
             participantsStep: null,
-            consentStep: null,
+            datePickerStep: null,
             fileUploadStep: null,
             currentAccessor: response.step.accessor,
             runningPrice: response.step.euroTotal,
@@ -1158,7 +1294,7 @@ export function Chat({
       if (response.step.type === "participants") {
         setFormStep(null);
         setParticipantsStep(response.step);
-        setConsentStep(null);
+        setDatePickerStep(null);
         setFileUploadStep(null);
         setCurrentAccessor(response.step.accessor);
         setOptions(undefined);
@@ -1170,32 +1306,7 @@ export function Chat({
             options: undefined,
             formStep: null,
             participantsStep: response.step,
-            consentStep: null,
-            fileUploadStep: null,
-            currentAccessor: response.step.accessor,
-            runningPrice: response.step.euroTotal,
-            finished: false,
-            fileNames: uploadedFilesRef.current.map((file) => file.name),
-          });
-        return;
-      }
-
-      if (response.step.type === "consent") {
-        setFormStep(null);
-        setParticipantsStep(null);
-        setConsentStep(response.step);
-        setFileUploadStep(null);
-        setCurrentAccessor(response.step.accessor);
-        setOptions(undefined);
-        setRunningPrice(response.step.euroTotal);
-        accessorSnapshotsRef.current[response.step.accessor] =
-          snapshotFromClient({
-            engineState: response.state,
-            messages: response.state.messages,
-            options: undefined,
-            formStep: null,
-            participantsStep: null,
-            consentStep: response.step,
+            datePickerStep: null,
             fileUploadStep: null,
             currentAccessor: response.step.accessor,
             runningPrice: response.step.euroTotal,
@@ -1208,7 +1319,7 @@ export function Chat({
       if (response.step.type === "fileUpload") {
         setFormStep(null);
         setParticipantsStep(null);
-        setConsentStep(null);
+        setDatePickerStep(null);
         setFileUploadStep(response.step);
         setCurrentAccessor(response.step.accessor);
         setOptions(undefined);
@@ -1220,7 +1331,7 @@ export function Chat({
             options: undefined,
             formStep: null,
             participantsStep: null,
-            consentStep: null,
+            datePickerStep: null,
             fileUploadStep: response.step,
             currentAccessor: response.step.accessor,
             runningPrice: response.step.euroTotal,
@@ -1230,27 +1341,54 @@ export function Chat({
         return;
       }
 
-      setFormStep(null);
-      setParticipantsStep(null);
-      setConsentStep(null);
-      setFileUploadStep(null);
-      setCurrentAccessor(response.step.accessor);
-      setOptions(response.step.options);
-      setRunningPrice(response.step.euroTotal);
-      accessorSnapshotsRef.current[response.step.accessor] =
-        snapshotFromClient({
-          engineState: response.state,
-          messages: response.state.messages,
-          options: response.step.options,
-          formStep: null,
-          participantsStep: null,
-          consentStep: null,
-          fileUploadStep: null,
-          currentAccessor: response.step.accessor,
-          runningPrice: response.step.euroTotal,
-          finished: false,
-          fileNames: uploadedFilesRef.current.map((file) => file.name),
-        });
+      if (response.step.type === "datePicker") {
+        setFormStep(null);
+        setParticipantsStep(null);
+        setDatePickerStep(response.step);
+        setFileUploadStep(null);
+        setCurrentAccessor(response.step.accessor);
+        setOptions(undefined);
+        setRunningPrice(response.step.euroTotal);
+        accessorSnapshotsRef.current[response.step.accessor] =
+          snapshotFromClient({
+            engineState: response.state,
+            messages: response.state.messages,
+            options: undefined,
+            formStep: null,
+            participantsStep: null,
+            datePickerStep: response.step,
+            fileUploadStep: null,
+            currentAccessor: response.step.accessor,
+            runningPrice: response.step.euroTotal,
+            finished: false,
+            fileNames: uploadedFilesRef.current.map((file) => file.name),
+          });
+        return;
+      }
+
+      if (response.step.type === "ask") {
+        setFormStep(null);
+        setParticipantsStep(null);
+        setDatePickerStep(null);
+        setFileUploadStep(null);
+        setCurrentAccessor(response.step.accessor);
+        setOptions(response.step.options);
+        setRunningPrice(response.step.euroTotal);
+        accessorSnapshotsRef.current[response.step.accessor] =
+          snapshotFromClient({
+            engineState: response.state,
+            messages: response.state.messages,
+            options: response.step.options,
+            formStep: null,
+            participantsStep: null,
+            datePickerStep: null,
+            fileUploadStep: null,
+            currentAccessor: response.step.accessor,
+            runningPrice: response.step.euroTotal,
+            finished: false,
+            fileNames: uploadedFilesRef.current.map((file) => file.name),
+          });
+      }
     },
     [onComplete],
   );
@@ -1278,6 +1416,13 @@ export function Chat({
       try {
         if (options?.recordHistory ?? true) {
           pendingSnapshotRef.current = captureSnapshot();
+          setRememberedEmail((current) =>
+            captureRememberedEmail(
+              current,
+              payload.userMessage,
+              payload.structuredAnswer,
+            ),
+          );
         }
 
         const activeState = options?.stateOverride ?? engineState;
@@ -1354,11 +1499,12 @@ export function Chat({
   const showTimeslotPicker =
     currentAccessor === "timeslots" &&
     Boolean(options?.length) &&
+    !datePickerStep &&
+    !engineState?.timeslotFallback &&
     !loading &&
     !finished &&
     !formStep &&
-    !participantsStep &&
-    !consentStep;
+    !participantsStep;
 
   useEffect(() => {
     const scrollTimer = window.setTimeout(() => {
@@ -1372,9 +1518,9 @@ export function Chat({
         return;
       }
 
-      if (consentStep) {
+      if (datePickerStep) {
         if (overflow) {
-          scrollIntoStep(consentStepRef.current, "nearest");
+          scrollIntoStep(datePickerStepRef.current, "nearest");
         }
         return;
       }
@@ -1439,7 +1585,7 @@ export function Chat({
     messages,
     formStep,
     participantsStep,
-    consentStep,
+    datePickerStep,
     fileUploadStep,
     pendingOcr,
     showTimeslotPicker,
@@ -1455,6 +1601,13 @@ export function Chat({
   useEffect(() => {
     setSelectedQuickReply(null);
   }, [currentAccessor, options]);
+
+  useEffect(() => {
+    setEngineUploadHardError(null);
+    setEngineUploadWarning(null);
+    setPendingEngineUpload(null);
+    setEngineUploadChecking(false);
+  }, [fileUploadStep?.productId]);
 
   useEffect(() => {
     if (!resumeFrom) {
@@ -1484,7 +1637,7 @@ export function Chat({
     } else if (resumeFrom.step.type === "form") {
       setFormStep(resumeFrom.step);
       setParticipantsStep(null);
-      setConsentStep(null);
+      setDatePickerStep(null);
       setFileUploadStep(null);
       setCurrentAccessor(resumeFrom.step.accessor);
       setOptions(undefined);
@@ -1492,15 +1645,7 @@ export function Chat({
     } else if (resumeFrom.step.type === "participants") {
       setFormStep(null);
       setParticipantsStep(resumeFrom.step);
-      setConsentStep(null);
-      setFileUploadStep(null);
-      setCurrentAccessor(resumeFrom.step.accessor);
-      setOptions(undefined);
-      setRunningPrice(resumeFrom.step.euroTotal);
-    } else if (resumeFrom.step.type === "consent") {
-      setFormStep(null);
-      setParticipantsStep(null);
-      setConsentStep(resumeFrom.step);
+      setDatePickerStep(null);
       setFileUploadStep(null);
       setCurrentAccessor(resumeFrom.step.accessor);
       setOptions(undefined);
@@ -1508,14 +1653,23 @@ export function Chat({
     } else if (resumeFrom.step.type === "fileUpload") {
       setFormStep(null);
       setParticipantsStep(null);
-      setConsentStep(null);
+      setDatePickerStep(null);
       setFileUploadStep(resumeFrom.step);
+      setCurrentAccessor(resumeFrom.step.accessor);
+      setOptions(undefined);
+      setRunningPrice(resumeFrom.step.euroTotal);
+    } else if (resumeFrom.step.type === "datePicker") {
+      setFormStep(null);
+      setParticipantsStep(null);
+      setDatePickerStep(resumeFrom.step);
+      setFileUploadStep(null);
       setCurrentAccessor(resumeFrom.step.accessor);
       setOptions(undefined);
       setRunningPrice(resumeFrom.step.euroTotal);
     } else {
       setFormStep(null);
       setParticipantsStep(null);
+      setDatePickerStep(null);
       setFileUploadStep(null);
       setCurrentAccessor(resumeFrom.step.accessor);
       setOptions(resumeFrom.step.options);
@@ -1534,7 +1688,7 @@ export function Chat({
       finished ||
       formStep ||
       participantsStep ||
-      consentStep ||
+      datePickerStep ||
       fileUploadStep
     ) {
       return;
@@ -1544,33 +1698,164 @@ export function Chat({
   };
 
   const handleQuickReply = (option: StepOption) => {
-    if (loading || finished || formStep || participantsStep || consentStep || fileUploadStep) {
+    if (
+      loading ||
+      finished ||
+      formStep ||
+      participantsStep ||
+      datePickerStep ||
+      fileUploadStep
+    ) {
       return;
     }
     setSelectedQuickReply(option.value);
     void sendMessage(option.value);
   };
 
-  const handleEngineFileUpload = useCallback(
-    (file: File) => {
-      if (!file || loading || finished || !fileUploadStep) {
-        return;
-      }
+  const commitEngineFileUpload = useCallback(
+    (file: File, productId: string) => {
       uploadedFilesRef.current = [
         ...uploadedFilesRef.current.filter((entry) => entry.name !== file.name),
         file,
       ];
       sessionFileOwnersRef.current = {
         ...sessionFileOwnersRef.current,
-        [file.name]: fileUploadStep.productId,
+        [file.name]: productId,
       };
       void postChat({
         userMessage: file.name,
-        uploadProductId: fileUploadStep.productId,
+        uploadProductId: productId,
         uploadKind: "file",
       });
     },
-    [fileUploadStep, finished, loading, postChat],
+    [postChat],
+  );
+
+  const resetEngineUploadState = useCallback(() => {
+    setEngineUploadHardError(null);
+    setEngineUploadWarning(null);
+    setPendingEngineUpload(null);
+    setEngineUploadChecking(false);
+  }, []);
+
+  const handleEngineFileUpload = useCallback(
+    async (file: File) => {
+      if (!file || loading || finished || !fileUploadStep || engineUploadChecking) {
+        return;
+      }
+
+      resetEngineUploadState();
+      setEngineUploadChecking(true);
+
+      try {
+        const formData = new FormData();
+        formData.append("file", file, file.name);
+
+        const response = await fetch("/api/ocr", {
+          method: "POST",
+          body: formData,
+        });
+
+        const data = (await response.json()) as OcrResponse & {
+          error?: string;
+        };
+
+        if (!response.ok) {
+          setEngineUploadHardError(
+            data.error ?? "That doesn't look like a valid PDF.",
+          );
+          return;
+        }
+
+        const mismatch = detectOcrContentMismatch(
+          data,
+          fileUploadStep.productId,
+          fileUploadStep.productLabel,
+        );
+
+        if (mismatch) {
+          setPendingEngineUpload(file);
+          setEngineUploadWarning({
+            message: mismatch.message,
+            detectedProductTitle: mismatch.detectedProductTitle,
+          });
+          return;
+        }
+
+        commitEngineFileUpload(file, fileUploadStep.productId);
+      } catch (err) {
+        setEngineUploadHardError(
+          err instanceof Error
+            ? err.message
+            : "Could not check that file — try again.",
+        );
+      } finally {
+        setEngineUploadChecking(false);
+      }
+    },
+    [
+      commitEngineFileUpload,
+      engineUploadChecking,
+      fileUploadStep,
+      finished,
+      loading,
+      resetEngineUploadState,
+    ],
+  );
+
+  const handleEngineUploadUseAnyway = useCallback(() => {
+    if (!pendingEngineUpload || !fileUploadStep || loading || finished) {
+      return;
+    }
+    const file = pendingEngineUpload;
+    const productId = fileUploadStep.productId;
+    resetEngineUploadState();
+    commitEngineFileUpload(file, productId);
+  }, [
+    commitEngineFileUpload,
+    fileUploadStep,
+    finished,
+    loading,
+    pendingEngineUpload,
+    resetEngineUploadState,
+  ]);
+
+  const finishOcrProduct = useCallback(
+    async (
+      activeState: EngineState,
+      file: File,
+      product: { id: string; title: string },
+    ): Promise<boolean> => {
+      sessionFileOwnersRef.current = {
+        ...sessionFileOwnersRef.current,
+        [file.name]: product.id,
+      };
+
+      const productRes = await postChat(
+        { userMessage: product.title },
+        { stateOverride: activeState, recordHistory: true, manageLoading: false },
+      );
+      if (!productRes) {
+        return false;
+      }
+
+      if (
+        productRes.step.type === "fileUpload" &&
+        productRes.step.productId === product.id
+      ) {
+        await postChat(
+          {
+            userMessage: file.name,
+            uploadProductId: product.id,
+            uploadKind: "file",
+          },
+          { stateOverride: productRes.state, recordHistory: true, manageLoading: false },
+        );
+      }
+
+      return true;
+    },
+    [postChat],
   );
 
   const processDocumentUpload = useCallback(
@@ -1580,6 +1865,7 @@ export function Chat({
       }
 
       setOcrReading(true);
+      setDocUploadHardError(null);
       setError(null);
       setPendingOcr(null);
 
@@ -1604,6 +1890,22 @@ export function Chat({
         };
 
         if (!response.ok) {
+          if (data.error) {
+            setDocUploadHardError(data.error);
+            setMessages((prev) =>
+              prev.filter(
+                (message) => message.content !== "Reading your document…",
+              ),
+            );
+            setPendingOcr(null);
+            return;
+          }
+
+          const partyPrefill = normalizeOcrParty(data.extracted?.party);
+          if (partyPrefill) {
+            setOcrPartyPrefill(partyPrefill);
+          }
+
           const softMessage =
             data.notice ??
             "I couldn't read much from that document — let's fill it in together.";
@@ -1631,6 +1933,11 @@ export function Chat({
           ...uploadedFilesRef.current.filter((entry) => entry.name !== file.name),
           file,
         ];
+
+        const partyPrefill = normalizeOcrParty(data.extracted?.party);
+        if (partyPrefill) {
+          setOcrPartyPrefill(partyPrefill);
+        }
 
         const assistantMessage = formatOcrSummary(data, file.name);
 
@@ -1670,44 +1977,6 @@ export function Chat({
       }
     },
     [engineState, finished, loading, ocrReading],
-  );
-
-  const finishOcrProduct = useCallback(
-    async (
-      activeState: EngineState,
-      file: File,
-      product: { id: string; title: string },
-    ): Promise<boolean> => {
-      sessionFileOwnersRef.current = {
-        ...sessionFileOwnersRef.current,
-        [file.name]: product.id,
-      };
-
-      const productRes = await postChat(
-        { userMessage: product.title },
-        { stateOverride: activeState, recordHistory: true, manageLoading: false },
-      );
-      if (!productRes) {
-        return false;
-      }
-
-      if (
-        productRes.step.type === "fileUpload" &&
-        productRes.step.productId === product.id
-      ) {
-        await postChat(
-          {
-            userMessage: file.name,
-            uploadProductId: product.id,
-            uploadKind: "file",
-          },
-          { stateOverride: productRes.state, recordHistory: true, manageLoading: false },
-        );
-      }
-
-      return true;
-    },
-    [postChat],
   );
 
   const handleOcrCountry = useCallback(
@@ -1805,13 +2074,33 @@ export function Chat({
     [engineState?.form],
   );
 
+  const partyFormPrefill = useMemo(() => {
+    if (!formStep) {
+      return undefined;
+    }
+    return buildPartyFormPrefill(
+      ocrPartyPrefill ?? undefined,
+      rememberedEmail,
+      formStep.fields,
+    );
+  }, [formStep, ocrPartyPrefill, rememberedEmail]);
+
+  const participantEmailSuggestion = useMemo(
+    () =>
+      primaryParticipantEmailSuggestion({
+        rememberedEmail,
+        ocrParty: ocrPartyPrefill ?? undefined,
+      }),
+    [rememberedEmail, ocrPartyPrefill],
+  );
+
   const showCountryPickerStep =
     currentAccessor === "destinationCountry" &&
     !finished &&
     !pendingOcr &&
     !formStep &&
     !participantsStep &&
-    !consentStep &&
+    !datePickerStep &&
     !fileUploadStep;
 
   const handleManualCountrySelect = useCallback(
@@ -1833,7 +2122,7 @@ export function Chat({
     !finished &&
     !formStep &&
     !participantsStep &&
-    !consentStep &&
+    !datePickerStep &&
     !fileUploadStep &&
     currentAccessor !== "timeslots" &&
     currentAccessor !== "destinationCountry";
@@ -1848,10 +2137,12 @@ export function Chat({
   const canGoBack = historyDepth > 0 && !loading;
 
   const selectedFileForUpload = fileUploadStep
-    ? (uploadedFilesRef.current.find(
+    ? (pendingEngineUpload ??
+      uploadedFilesRef.current.find(
         (file) =>
           sessionFileOwnersRef.current[file.name] === fileUploadStep.productId,
-      ) ?? null)
+      ) ??
+      null)
     : null;
 
   const showHero =
@@ -1921,6 +2212,7 @@ export function Chat({
                 <DocumentUploadZone
                   disabled={loading || ocrReading || !engineState}
                   busy={ocrReading}
+                  hardError={docUploadHardError}
                   onFile={(file) => void processDocumentUpload(file)}
                 />
               </AssistantStepRow>
@@ -1970,8 +2262,12 @@ export function Chat({
                 className="step-enter"
               >
                 <PartyForm
+                  key={formStep.accessor}
                   step={formStep}
                   loading={loading}
+                  initialValues={partyFormPrefill?.defaults}
+                  suggestedFields={partyFormPrefill?.suggestedFields}
+                  suggestedFieldLabels={partyFormPrefill?.suggestedFieldLabels}
                   onSubmit={(values) => void sendStructuredAnswer(values)}
                 />
               </AssistantStepRow>
@@ -1985,20 +2281,21 @@ export function Chat({
                 <ParticipantsForm
                   step={participantsStep}
                   loading={loading}
+                  primaryEmailSuggestion={participantEmailSuggestion}
                   onSubmit={(values) => void sendStructuredAnswer(values)}
                 />
               </AssistantStepRow>
             )}
 
-            {consentStep && !finished && (
+            {datePickerStep && !finished && (
               <AssistantStepRow
-                innerRef={consentStepRef}
+                innerRef={datePickerStepRef}
                 className="step-enter"
               >
-                <ConsentForm
-                  step={consentStep}
+                <AppointmentDatePicker
+                  step={datePickerStep}
                   loading={loading}
-                  onSubmit={(values) => void sendStructuredAnswer(values)}
+                  onSubmit={(date) => void sendStructuredAnswer({ date })}
                 />
               </AssistantStepRow>
             )}
@@ -2035,8 +2332,13 @@ export function Chat({
                 <InlineFileUploadCard
                   productLabel={fileUploadStep.productLabel}
                   loading={loading}
+                  checking={engineUploadChecking}
                   selectedFile={selectedFileForUpload}
-                  onFile={handleEngineFileUpload}
+                  hardError={engineUploadHardError}
+                  contentWarning={engineUploadWarning}
+                  onFile={(file) => void handleEngineFileUpload(file)}
+                  onUseAnyway={handleEngineUploadUseAnyway}
+                  onReplace={resetEngineUploadState}
                 />
               </AssistantStepRow>
             )}
@@ -2118,11 +2420,13 @@ export function Chat({
                   ? "Booking complete"
                   : fileUploadStep
                     ? "Use the upload card above…"
-                    : formStep || participantsStep || consentStep
+                    : formStep || participantsStep || datePickerStep
                       ? "Use the form above…"
                       : showTimeslotPicker
                         ? "Pick a time above…"
-                        : showDocUpload
+                        : datePickerStep
+                          ? "Pick a date above…"
+                          : showDocUpload
                           ? "Type an answer or attach a document…"
                           : "Type your answer…"
               }
@@ -2131,7 +2435,7 @@ export function Chat({
                 finished ||
                 Boolean(formStep) ||
                 Boolean(participantsStep) ||
-                Boolean(consentStep) ||
+                Boolean(datePickerStep) ||
                 Boolean(fileUploadStep) ||
                 showTimeslotPicker
               }
@@ -2145,7 +2449,7 @@ export function Chat({
                 finished ||
                 Boolean(formStep) ||
                 Boolean(participantsStep) ||
-                Boolean(consentStep) ||
+                Boolean(datePickerStep) ||
                 Boolean(fileUploadStep) ||
                 showTimeslotPicker ||
                 !input.trim()

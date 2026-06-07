@@ -1,0 +1,30 @@
+{
+  "destinationCountry": "ES",
+  "destinationCountryLabel": "Spain",
+  "productHint": "Power of Attorney",
+  "purposeHint": "obtaining a Spanish Foreign Identity Number (NIE)",
+  "productId": "UpEJ7raQEKQKFhWn12r2",
+  "productTitle": "Nie number application",
+  "suggestedProductId": "UpEJ7raQEKQKFhWn12r2",
+  "productConfidence": "high",
+  "productMatchReason": "Document purpose matches \"Nie number application\"",
+  "countryOptions": [
+    { "code": "ES", "label": "Spain" },
+    { "code": "AT", "label": "Austria" }
+  ],
+  "productOptions": [
+    { "id": "UpEJ7raQEKQKFhWn12r2", "title": "Nie number application" },
+    { "id": "sig-1", "title": "Signature notarisation" },
+    { "id": "cert-1", "title": "Certified copy" }
+  ],
+  "extracted": {
+    "documentType": "Power of Attorney",
+    "summary": "Power of Attorney authorising an agent to obtain a Spanish NIE for Joshua Timms",
+    "party": {
+      "firstName": "Joshua",
+      "lastName": "Timms",
+      "address": "5th Ave 350"
+    }
+  },
+  "confidence": "high"
+}

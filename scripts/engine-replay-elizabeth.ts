@@ -13,7 +13,14 @@ import {
   type EngineState,
   type EngineStep,
 } from "../lib/engine";
-import { parseBookingForm } from "../lib/form-interpreter";
+import {
+  buildPartyFormFields,
+  getPartyFormFieldsForAccessor,
+} from "../lib/engine";
+import { parseBookingForm, type Collected } from "../lib/form-interpreter";
+import { describePartyPrefillMapping } from "../lib/ocr-party-prefill";
+import { normalizeOcrParty } from "../lib/ocr-types";
+import { describeRememberedEmailPrefill } from "../lib/remembered-email";
 import { readOcrCache } from "../lib/ocr-cache";
 import { getBookingForm, priceRequest, sumNetToEuros } from "../lib/notarity";
 
@@ -62,6 +69,12 @@ const answerQueues: Record<string, ScriptedAnswer[]> = {
   ],
 };
 
+function tomorrowIsoDate(): string {
+  const date = new Date();
+  date.setUTCDate(date.getUTCDate() + 1);
+  return date.toISOString().slice(0, 10);
+}
+
 function nextScriptedAnswer(
   step: EngineStep,
   state: EngineState,
@@ -78,13 +91,6 @@ function nextScriptedAnswer(
       throw new Error(`No form answer for accessor: ${step.accessor}`);
     }
     return { userMessage: "", structuredAnswer: next.value };
-  }
-
-  if (step.type === "consent") {
-    return {
-      userMessage: "",
-      structuredAnswer: { termsAccepted: true, newsletter: false },
-    };
   }
 
   if (step.type === "fileUpload") {
@@ -119,13 +125,22 @@ function nextScriptedAnswer(
     return { userMessage: next.value };
   }
 
+  if (step.type === "datePicker") {
+    return {
+      userMessage: "",
+      structuredAnswer: { date: tomorrowIsoDate() },
+    };
+  }
+
   if (step.type !== "ask") {
-    throw new Error(`Expected ask, participants, fileUpload, consent, or form step, got ${step.type}`);
+    throw new Error(
+      `Expected ask, participants, fileUpload, form, or datePicker step, got ${step.type}`,
+    );
   }
 
   const accessor = step.accessor;
   if (accessor === "preferredNotary") {
-    return { userMessage: "" };
+    return { userMessage: "No preference" };
   }
   if (accessor === "timeslots") {
     const slotId = state.availableTimeslots?.[0]?.id;
@@ -300,11 +315,50 @@ async function main(): Promise<void> {
     );
   }
   console.log(
-    `OCR mock: country=${ocr.destinationCountry ?? "—"} product=${ocr.productTitle ?? ocr.productHint ?? "—"}\n`,
+    `OCR mock: country=${ocr.destinationCountry ?? "—"} suggestedProductId=${ocr.suggestedProductId ?? ocr.productId ?? "—"} confidence=${ocr.productConfidence ?? "—"}\n`,
   );
 
   const rawForm = await getBookingForm("start-vienna-hackathon");
   const form = parseBookingForm(rawForm);
+
+  const flexCoCollected: Collected = {
+    destinationCountry: "AT",
+    products: [
+      {
+        id: FLEXCO_PRODUCT_ID,
+        files: [],
+        apostille: null,
+        userInput: "",
+        documentsNotReadyYet: false,
+        needHelpDrafting: false,
+        proofOfRepresentation: null,
+      },
+    ],
+  };
+  const billingComponent = form.pages
+    .flatMap((page) => page.components)
+    .find((component) => (component.accessor ?? component.type) === "billingDetails");
+  const billingFields = billingComponent
+    ? buildPartyFormFields(billingComponent, flexCoCollected, [])
+    : getPartyFormFieldsForAccessor(form, "billingDetails", flexCoCollected, []);
+  const prefillLines = describePartyPrefillMapping(
+    normalizeOcrParty(ocr.extracted?.party) ?? undefined,
+    billingFields,
+  );
+  console.log("OCR party prefill mapping (billing):");
+  for (const line of prefillLines) {
+    console.log(`  ${line}`);
+  }
+  const rememberedLines = describeRememberedEmailPrefill(ELIZABETH_EMAIL, [
+    "participants[0].email",
+    "billingDetails.email",
+    "contactDetails.email",
+  ]);
+  console.log("Remembered email prefill (after user enters at participants):");
+  for (const line of rememberedLines) {
+    console.log(`  ${line}`);
+  }
+  console.log("");
 
   let state: EngineState = {
     form,
@@ -361,9 +415,13 @@ async function main(): Promise<void> {
     const label =
       result.type === "form"
         ? `FORM [${result.accessor}]: ${result.title}`
-        : result.type === "fileUpload"
-          ? `UPLOAD [${result.productId}] ${result.productLabel}: ${result.question}`
-          : `ASK [${result.accessor}]: ${result.question}`;
+        : result.type === "participants"
+          ? `PARTICIPANTS [${result.accessor}]: ${result.title}`
+          : result.type === "fileUpload"
+            ? `UPLOAD [${result.productId}] ${result.productLabel}: ${result.question}`
+            : result.type === "datePicker"
+              ? `DATE [${result.accessor}]: ${result.title}`
+              : `ASK [${result.accessor}]: ${result.question}`;
     console.log(label);
     if (result.euroTotal !== undefined) {
       console.log(`  (running price: €${result.euroTotal})`);

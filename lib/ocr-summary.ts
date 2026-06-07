@@ -1,4 +1,16 @@
+import { hasOcrProductSuggestion } from "./ocr-product-map";
 import type { OcrResponse } from "./ocr-types";
+
+function countryFlag(code: string): string {
+  const normalized = code.trim().toUpperCase();
+  if (!/^[A-Z]{2}$/.test(normalized)) {
+    return "";
+  }
+  const points = [...normalized].map(
+    (char) => 0x1f1e6 + char.charCodeAt(0) - 65,
+  );
+  return String.fromCodePoint(...points);
+}
 
 /** Raw instrument type from OCR — not the mapped booking product. */
 function detectedDocumentLabel(ocr: OcrResponse): string | undefined {
@@ -21,14 +33,11 @@ export function formatOcrSummary(ocr: OcrResponse, fileName: string): string {
 
   if (ocr.destinationCountry) {
     const label = ocr.destinationCountryLabel ?? ocr.destinationCountry;
-    const flag =
-      ocr.destinationCountry === "ES"
-        ? " 🇪🇸"
-        : ocr.destinationCountry === "AT"
-          ? " 🇦🇹"
-          : "";
+    const flag = countryFlag(ocr.destinationCountry);
     lines.push("");
-    lines.push(`Looks like this is for ${label}${flag}.`);
+    lines.push(
+      `Looks like this is for ${label}${flag ? ` ${flag}` : ""}.`,
+    );
   }
 
   if (ocr.ambiguousProduct) {
@@ -36,14 +45,17 @@ export function formatOcrSummary(ocr: OcrResponse, fileName: string): string {
     lines.push(
       "This document could match more than one booking product — pick the right one below.",
     );
-  } else if (ocr.suggestedProductId && ocr.productTitle) {
+  } else if (hasOcrProductSuggestion(ocr) && ocr.productTitle) {
     lines.push("");
     const detected = detectedDocumentLabel(ocr);
     const booking = ocr.productTitle;
+    const reason = ocr.productMatchReason ? ` (${ocr.productMatchReason})` : "";
     if (detected && detected.toLowerCase() !== booking.toLowerCase()) {
-      lines.push(`Detected: ${detected} → booking as ${booking}. Correct?`);
+      lines.push(
+        `Detected: ${detected} → suggested ${booking}${reason}.`,
+      );
     } else {
-      lines.push(`Best match: ${booking}`);
+      lines.push(`Suggested product: ${booking}${reason}.`);
     }
   } else if (ocr.productHint || ocr.purposeHint) {
     lines.push("");

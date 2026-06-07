@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { buildPriceDisplay } from "../price-display";
-import type { PriceLineItem } from "../notarity-api";
+import type { PriceLineItem } from "../notarity";
 
 describe("buildPriceDisplay", () => {
   test("reads explicit tax fields when present", () => {

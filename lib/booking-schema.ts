@@ -1,5 +1,10 @@
 import { z } from "zod";
 
+export const BusinessDetails = z.object({
+  companyName: z.string(),
+  vat: z.string().optional().default(""),
+});
+
 // A billing / contact / shipping party
 export const Party = z.object({
   firstName: z.string(),
@@ -12,6 +17,7 @@ export const Party = z.object({
   city: z.string().optional(),
   stateProvince: z.string().optional(),
   countryCode: z.string().length(2).optional(), // ISO-3166 alpha-2
+  businessDetails: BusinessDetails.optional(),
 });
 
 export const ProductSelection = z.object({

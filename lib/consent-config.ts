@@ -22,20 +22,17 @@ export function isConsentComponent(component: Component): boolean {
 
 function isConsentComponentFilled(
   component: Component,
-  collected: Collected,
-  config: ConsentConfig,
+  _collected: Collected,
+  _config: ConsentConfig,
 ): boolean {
   if (component.type === "confirmTC") {
-    if (!config.termsRequired) {
-      return true;
-    }
-    return collected.termsAccepted === true;
+    return true;
   }
   if (
     component.type === "newsletter" ||
     component.accessor === "newsletter"
   ) {
-    return collected.newsletter !== undefined;
+    return true;
   }
   return true;
 }

@@ -1,30 +1,15 @@
 import { NextResponse } from "next/server";
 
+import { isOcrMockEnabled, writeOcrCache } from "@/lib/ocr-cache";
 import { inferFromDocument } from "@/lib/ocr-inference";
+import { validatePdfUpload } from "@/lib/upload-validation";
 
 export const runtime = "nodejs";
-
-const ALLOWED_TYPES = new Set([
-  "application/pdf",
-  "image/jpeg",
-  "image/jpg",
-  "image/png",
-  "image/webp",
-]);
 
 function mimeFromName(fileName: string): string | undefined {
   const lower = fileName.toLowerCase();
   if (lower.endsWith(".pdf")) {
     return "application/pdf";
-  }
-  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) {
-    return "image/jpeg";
-  }
-  if (lower.endsWith(".png")) {
-    return "image/png";
-  }
-  if (lower.endsWith(".webp")) {
-    return "image/webp";
   }
   return undefined;
 }
@@ -42,22 +27,31 @@ export async function POST(request: Request): Promise<NextResponse> {
     }
 
     const mimeType =
-      (file.type && ALLOWED_TYPES.has(file.type) ? file.type : undefined) ??
-      mimeFromName(file.name);
-
-    if (!mimeType || !ALLOWED_TYPES.has(mimeType)) {
-      return NextResponse.json(
-        { error: "Unsupported file type. Upload a PDF or image." },
-        { status: 400 },
-      );
-    }
+      (file.type?.trim().toLowerCase() === "application/pdf"
+        ? "application/pdf"
+        : undefined) ?? mimeFromName(file.name);
 
     const bytes = Buffer.from(await file.arrayBuffer());
+    const validation = validatePdfUpload({
+      bytes,
+      fileName: file.name,
+      mimeType,
+    });
+
+    if (!validation.ok) {
+      return NextResponse.json({ error: validation.error }, { status: 400 });
+    }
+
     const result = await inferFromDocument({
       bytes,
-      mimeType,
+      mimeType: "application/pdf",
       fileName: file.name,
     });
+
+    if (!isOcrMockEnabled() && !result.notice) {
+      // Best-effort dev cache — never fail the request (Vercel FS is read-only except /tmp).
+      writeOcrCache(file.name, result);
+    }
 
     return NextResponse.json(result);
   } catch (error) {

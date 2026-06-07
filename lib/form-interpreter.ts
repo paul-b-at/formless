@@ -143,6 +143,7 @@ export type BookingFormSchema = z.infer<typeof BookingFormSchemaSchema>;
 export type ProductDefinition = {
   id: string;
   title: Record<string, string>;
+  description?: Record<string, string>;
   apostilleRequired?: boolean;
   showApostille?: boolean;
   fileUploadRequired?: boolean;
@@ -152,6 +153,8 @@ export type ProductDefinition = {
 export type Collected = Partial<AppointmentRequest> & {
   /** UI/engine meta — stripped before AppointmentRequest.parse */
   termsAccepted?: boolean;
+  participantsExpectMore?: boolean;
+  participantsFinalized?: boolean;
 };
 
 const SKIP_TYPES = new Set(["condition", "summary", "singleProduct", "preferredNotary"]);
@@ -662,11 +665,8 @@ function isComponentFilled(
   catalog: ProductDefinition[],
 ): boolean {
   if (component.type === "confirmTC") {
-    const required = component.props?.required !== false;
-    if (!required) {
-      return true;
-    }
-    return collected.termsAccepted === true;
+    // T&C acceptance is collected once in the Review summary, not in chat.
+    return true;
   }
 
   const accessor = getAccessor(component);
@@ -714,7 +714,8 @@ function isComponentFilled(
       return isPartyFilled(shipping);
     }
     case "newsletter":
-      return collected.newsletter !== undefined;
+      // Newsletter opt-in is collected in the Review summary, not in chat.
+      return true;
     case "preferredNotary":
       return true;
     default:

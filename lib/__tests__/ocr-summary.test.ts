@@ -23,7 +23,7 @@ describe("formatOcrSummary", () => {
     );
 
     expect(summary).toContain(
-      "Detected: Power of Attorney → booking as Nie number application. Correct?",
+      "Detected: Power of Attorney → suggested Nie number application",
     );
     expect(summary).not.toContain("(document type:");
     expect(summary).not.toContain("Best match: Nie number application");

@@ -21,6 +21,24 @@ const INSTRUMENT_TO_PRODUCT: [RegExp, string][] = [
   [/declaration|affidavit|statutory\s+declaration/i, "signature notarisation"],
 ];
 
+export type CatalogProductCandidate = {
+  id: string;
+  name: string;
+  description: string;
+};
+
+export type ProductMapConfidence = "high" | "medium" | "low";
+
+export type ProductMapResult = {
+  productId?: string;
+  productTitle?: string;
+  suggestedProductId?: string;
+  alternativeProductIds?: string[];
+  ambiguous?: boolean;
+  productConfidence?: ProductMapConfidence;
+  productMatchReason?: string;
+};
+
 function catalogByTitle(
   catalog: ProductDefinition[],
   titleNeedle: string,
@@ -82,45 +100,211 @@ function combineDocumentContext(args: {
     .join(" ");
 }
 
+const GENERIC_MATCH_TOKENS = new Set([
+  "about",
+  "agreement",
+  "application",
+  "articles",
+  "association",
+  "change",
+  "commercial",
+  "company",
+  "copy",
+  "copies",
+  "director",
+  "document",
+  "documents",
+  "establish",
+  "estate",
+  "formation",
+  "general",
+  "letter",
+  "liability",
+  "limited",
+  "liquidation",
+  "managing",
+  "notaries",
+  "notary",
+  "notarisation",
+  "number",
+  "online",
+  "other",
+  "partner",
+  "partnership",
+  "power",
+  "purchase",
+  "real",
+  "register",
+  "registered",
+  "seat",
+  "shares",
+  "special",
+  "transfer",
+  "type",
+  "unknown",
+]);
+
+function tokenize(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter(
+      (token) => token.length >= 3 && !GENERIC_MATCH_TOKENS.has(token),
+    );
+}
+
+function overlapScore(
+  context: string,
+  text: string,
+  weight: number,
+): number {
+  const normalizedContext = context.toLowerCase();
+  const contextTokens = new Set(tokenize(context));
+  let score = 0;
+
+  for (const token of tokenize(text)) {
+    if (contextTokens.has(token)) {
+      score += token.length * weight;
+      continue;
+    }
+    if (normalizedContext.includes(token)) {
+      score += token.length * weight * 0.75;
+    }
+  }
+
+  return score;
+}
+
+function scoreCatalogProduct(
+  context: string,
+  product: ProductDefinition,
+): { total: number; title: number } {
+  const title = product.title.en ?? product.id;
+  const description = product.description?.en ?? "";
+  const titleScore = overlapScore(context, title, 3);
+  const descriptionScore = overlapScore(context, description, 1);
+  return {
+    total: titleScore + descriptionScore,
+    title: titleScore,
+  };
+}
+
+function matchResult(
+  product: ProductDefinition,
+  confidence: ProductMapConfidence,
+  reason: string,
+): ProductMapResult {
+  if (confidence !== "high") {
+    return {};
+  }
+  const title = product.title.en ?? product.id;
+  return {
+    productTitle: title,
+    suggestedProductId: product.id,
+    productConfidence: "high",
+    productMatchReason: reason,
+  };
+}
+
+export function catalogProductCandidates(
+  catalog: ProductDefinition[],
+): CatalogProductCandidate[] {
+  return catalog
+    .filter((product) => product.title.en !== "Auto-added product")
+    .map((product) => ({
+      id: product.id,
+      name: product.title.en ?? product.id,
+      description: product.description?.en?.trim() ?? "",
+    }));
+}
+
+function semanticCatalogMatch(
+  context: string,
+  catalog: ProductDefinition[],
+): ProductMapResult | undefined {
+  const trimmed = context.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  const scored = catalog
+    .filter((product) => product.title.en !== "Auto-added product")
+    .map((product) => ({
+      product,
+      ...scoreCatalogProduct(trimmed, product),
+    }))
+    .filter((entry) => entry.title > 0)
+    .sort((left, right) =>
+      right.total !== left.total
+        ? right.total - left.total
+        : right.title - left.title,
+    );
+
+  if (scored.length === 0) {
+    return undefined;
+  }
+
+  const best = scored[0]!;
+  const second = scored[1];
+  const ratio = second ? best.total / second.total : Number.POSITIVE_INFINITY;
+
+  if (best.total >= 12 && best.title >= 9 && ratio >= 1.5) {
+    return matchResult(
+      best.product,
+      "high",
+      `Catalog match on "${best.product.title.en ?? best.product.id}" (${Math.round(best.total)} pts)`,
+    );
+  }
+
+  return undefined;
+}
+
 const GeminiPickSchema = {
   type: Type.OBJECT,
   properties: {
     productId: { type: Type.STRING, nullable: true },
     confidence: { type: Type.STRING, nullable: true },
+    reason: { type: Type.STRING, nullable: true },
   },
-  required: ["productId", "confidence"],
+  required: ["productId", "confidence", "reason"],
 } as const;
 
 async function geminiPickProduct(
   apiKey: string,
   context: string,
   catalog: ProductDefinition[],
-): Promise<ProductDefinition | undefined> {
-  if (catalog.length === 0) {
+): Promise<ProductMapResult | undefined> {
+  const candidates = catalogProductCandidates(catalog);
+  if (candidates.length === 0) {
     return undefined;
   }
 
   const ai = new GoogleGenAI({ apiKey });
-  const options = catalog
-    .filter((product) => product.title.en !== "Auto-added product")
-    .map((product) => `- ${product.id}: ${product.title.en ?? product.id}`)
+  const options = candidates
+    .map((product) => {
+      const description = product.description
+        ? ` — ${product.description}`
+        : "";
+      return `- ${product.id}: ${product.name}${description}`;
+    })
     .join("\n");
 
-  const prompt = `A user uploaded a legal document. Pick the closest REAL notary booking product.
+  const prompt = `A user uploaded a legal document. Pick the closest REAL notary booking product from the catalog.
 
 Document context:
 ${context}
 
-Available products (pick productId from this list exactly, or null if none fit):
+Available products (return productId from this list exactly, or null if none fit):
 ${options}
 
 Rules:
 - Map on the document's PURPOSE / end goal, not only its title. Example: a Power of Attorney whose purpose is "obtaining a Spanish NIE" → Nie number application, NOT Signature notarisation.
-- Prefer outcome products (NIE application, certified copy, etc.) when the document states a specific goal that matches the catalog.
+- Prefer outcome products (NIE application, certified copy, incorporation, etc.) when the document states a specific goal that matches the catalog.
 - Use Signature notarisation only for generic PoA/declarations with NO more specific outcome product on the list.
 - Return null if no product is a confident match.
 
-Return JSON: { "productId": "<id from list or null>", "confidence": "high"|"medium"|"low"|null }`;
+Return JSON: { "productId": "<id from list or null>", "confidence": "high"|"medium"|"low"|null, "reason": "<short why>" }`;
 
   try {
     const response = await ai.models.generateContent({
@@ -140,6 +324,7 @@ Return JSON: { "productId": "<id from list or null>", "confidence": "high"|"medi
     const parsed = JSON.parse(text) as {
       productId?: string | null;
       confidence?: string | null;
+      reason?: string | null;
     };
 
     const confidence = parsed.confidence ?? "low";
@@ -148,19 +333,25 @@ Return JSON: { "productId": "<id from list or null>", "confidence": "high"|"medi
     }
 
     const id = parsed.productId.trim();
-    return catalog.find((product) => product.id === id);
+    const product = catalog.find((entry) => entry.id === id);
+    if (!product) {
+      return undefined;
+    }
+
+    if (confidence !== "high") {
+      return undefined;
+    }
+
+    const reason =
+      typeof parsed.reason === "string" && parsed.reason.trim()
+        ? parsed.reason.trim()
+        : `Model matched "${product.title.en ?? product.id}"`;
+
+    return matchResult(product, "high", reason);
   } catch {
     return undefined;
   }
 }
-
-export type ProductMapResult = {
-  productId?: string;
-  productTitle?: string;
-  suggestedProductId?: string;
-  alternativeProductIds?: string[];
-  ambiguous?: boolean;
-};
 
 /** Map document context to catalog product(s). Purpose beats instrument type. */
 export async function mapDocumentHintToProduct(args: {
@@ -202,11 +393,11 @@ export async function mapDocumentHintToProduct(args: {
   const directMatch = hint ? directCatalogMatch(hint, args.catalog) : undefined;
 
   if (explicitPurpose) {
-    return {
-      productId: explicitPurpose.id,
-      productTitle: explicitPurpose.title.en,
-      suggestedProductId: explicitPurpose.id,
-    };
+    return matchResult(
+      explicitPurpose,
+      "high",
+      `Document purpose matches "${explicitPurpose.title.en ?? explicitPurpose.id}"`,
+    );
   }
 
   if (
@@ -216,47 +407,43 @@ export async function mapDocumentHintToProduct(args: {
   ) {
     return {
       ambiguous: true,
-      suggestedProductId: purposeMatch.id,
-      alternativeProductIds: [instrumentMatch.id],
+      alternativeProductIds: [purposeMatch.id, instrumentMatch.id],
     };
   }
 
   if (purposeMatch) {
-    return {
-      productId: purposeMatch.id,
-      productTitle: purposeMatch.title.en,
-      suggestedProductId: purposeMatch.id,
-    };
+    return matchResult(
+      purposeMatch,
+      "high",
+      `Document purpose matches "${purposeMatch.title.en ?? purposeMatch.id}"`,
+    );
   }
 
   if (directMatch) {
-    return {
-      productId: directMatch.id,
-      productTitle: directMatch.title.en,
-      suggestedProductId: directMatch.id,
-    };
+    return matchResult(
+      directMatch,
+      "high",
+      `Document type matches catalog product "${directMatch.title.en ?? directMatch.id}"`,
+    );
   }
 
   if (instrumentMatch) {
-    return {
-      productId: instrumentMatch.id,
-      productTitle: instrumentMatch.title.en,
-      suggestedProductId: instrumentMatch.id,
-    };
+    return matchResult(
+      instrumentMatch,
+      "high",
+      `Instrument type matches "${instrumentMatch.title.en ?? instrumentMatch.id}"`,
+    );
+  }
+
+  const semantic = semanticCatalogMatch(fullContext, args.catalog);
+  if (semantic?.productConfidence === "high") {
+    return semantic;
   }
 
   if (args.apiKey && fullContext.trim()) {
-    const picked = await geminiPickProduct(
-      args.apiKey,
-      fullContext,
-      args.catalog,
-    );
+    const picked = await geminiPickProduct(args.apiKey, fullContext, args.catalog);
     if (picked) {
-      return {
-        productId: picked.id,
-        productTitle: picked.title.en,
-        suggestedProductId: picked.id,
-      };
+      return picked;
     }
   }
 
@@ -279,4 +466,35 @@ export function catalogProductOptions(
       id: product.id,
       title: product.title.en ?? product.id,
     }));
+}
+
+/** True when OCR should highlight one catalog product as a tappable suggestion. */
+export function hasOcrProductSuggestion(ocr: {
+  suggestedProductId?: string | null;
+  productConfidence?: ProductMapConfidence;
+  ambiguousProduct?: boolean;
+}): boolean {
+  return Boolean(
+    ocr.suggestedProductId &&
+      ocr.productConfidence === "high" &&
+      !ocr.ambiguousProduct,
+  );
+}
+
+export function sortProductOptionsWithSuggestion(
+  options: { id: string; title: string }[],
+  suggestedProductId: string | undefined,
+): { id: string; title: string }[] {
+  if (!suggestedProductId) {
+    return options;
+  }
+  return [...options].sort((left, right) => {
+    if (left.id === suggestedProductId) {
+      return -1;
+    }
+    if (right.id === suggestedProductId) {
+      return 1;
+    }
+    return 0;
+  });
 }

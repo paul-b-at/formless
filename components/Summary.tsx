@@ -28,6 +28,7 @@ import {
 } from "@/components/product-edit";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   Card,
@@ -57,6 +58,16 @@ import {
   buildTimeslotOptions,
   formatTimeslotLabel,
 } from "@/lib/timeslot-format";
+import {
+  getPreferredNotaryConfig,
+  preferredNotaryDisplayLabel,
+  PREFERRED_NOTARY_DEFAULT,
+} from "@/lib/preferred-notary-config";
+import {
+  fallbackDateBounds,
+  formatTimeslotPayloadDisplay,
+  isTimeslotFallbackValue,
+} from "@/lib/timeslot-fallback";
 
 type SummaryProps = {
   booking: CompleteBooking;
@@ -122,6 +133,9 @@ export function Summary({
   const [editingAccessor, setEditingAccessor] = useState<string | null>(null);
   const [editLoading, setEditLoading] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
+  const [editTimeslotDate, setEditTimeslotDate] = useState(
+    () => payload.timeslots[0] ?? "",
+  );
 
   const consentConfig = useMemo(
     () => getConsentConfig(engineState.form, engineState.collected),
@@ -161,6 +175,25 @@ export function Summary({
     }
     return buildTimeslotOptions(availableTimeslots);
   }, [availableTimeslots]);
+
+  const preferredNotaryConfig = useMemo(
+    () =>
+      getPreferredNotaryConfig(
+        engineState.form,
+        engineState.collected,
+        engineState.productCatalog ?? [],
+      ),
+    [engineState.collected, engineState.form, engineState.productCatalog],
+  );
+
+  const preferredNotaryLabel = useMemo(
+    () =>
+      preferredNotaryDisplayLabel(
+        payload.preferredNotary,
+        preferredNotaryConfig,
+      ),
+    [payload.preferredNotary, preferredNotaryConfig],
+  );
 
   const applyEdit = async (
     accessor: string,
@@ -255,7 +288,7 @@ export function Summary({
     if (slot) {
       return formatTimeslotLabel(slot.startTime);
     }
-    return slotId;
+    return formatTimeslotPayloadDisplay(slotId, availableTimeslots ?? []);
   }, [availableTimeslots, payload.timeslots]);
 
   const handleBook = async () => {
@@ -371,6 +404,54 @@ export function Summary({
       return null;
     }
 
+    if (accessor === "preferredNotary") {
+      if (!preferredNotaryConfig.showPicker) {
+        return (
+          <p className="mt-2 text-xs text-muted-foreground">
+            No notary options in the form config for this booking path.
+          </p>
+        );
+      }
+
+      const choices = [
+        { label: "No preference", value: PREFERRED_NOTARY_DEFAULT },
+        ...preferredNotaryConfig.options.map((option) => ({
+          label: option.label,
+          value: option.id,
+        })),
+      ];
+
+      return (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {choices.map((choice) => (
+            <Button
+              key={choice.value || "none"}
+              type="button"
+              size="sm"
+              variant={
+                (payload.preferredNotary ?? "") === choice.value
+                  ? "default"
+                  : "outline"
+              }
+              disabled={editLoading}
+              onClick={() => void applyEdit(accessor, choice.value)}
+            >
+              {choice.label}
+            </Button>
+          ))}
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            disabled={editLoading}
+            onClick={() => setEditingAccessor(null)}
+          >
+            Cancel
+          </Button>
+        </div>
+      );
+    }
+
     if (accessor === "destinationCountry") {
       return (
         <div className="mt-3 flex flex-wrap gap-2">
@@ -406,28 +487,74 @@ export function Summary({
       );
     }
 
-    if (accessor === "timeslots" && timeslotOptions.length > 0 && availableTimeslots) {
-      return (
-        <div className="mt-3">
-          <TimeslotPicker
-            options={timeslotOptions}
-            availableTimeslots={availableTimeslots}
-            loading={editLoading}
-            initialSlotId={payload.timeslots[0]}
-            onConfirm={(slotId) => void applyEdit(accessor, [slotId])}
-          />
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            className="mt-2"
-            disabled={editLoading}
-            onClick={() => setEditingAccessor(null)}
-          >
-            Cancel
-          </Button>
-        </div>
-      );
+    if (accessor === "timeslots") {
+      const slotValue = payload.timeslots[0] ?? "";
+      const isFallback =
+        isTimeslotFallbackValue(slotValue) || engineState.timeslotFallback;
+
+      if (timeslotOptions.length > 0 && availableTimeslots && !isFallback) {
+        return (
+          <div className="mt-3">
+            <TimeslotPicker
+              options={timeslotOptions}
+              availableTimeslots={availableTimeslots}
+              loading={editLoading}
+              initialSlotId={payload.timeslots[0]}
+              onConfirm={(slotId) => void applyEdit(accessor, [slotId])}
+            />
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              className="mt-2"
+              disabled={editLoading}
+              onClick={() => setEditingAccessor(null)}
+            >
+              Cancel
+            </Button>
+          </div>
+        );
+      }
+
+      if (isFallback) {
+        const bounds = fallbackDateBounds();
+        return (
+          <div className="mt-3 flex flex-col gap-2">
+            <Label htmlFor="summary-timeslot-date" className="text-xs">
+              Preferred appointment date
+            </Label>
+            <Input
+              id="summary-timeslot-date"
+              type="date"
+              value={editTimeslotDate}
+              min={bounds.min}
+              max={bounds.max}
+              disabled={editLoading}
+              className="max-w-xs"
+              onChange={(event) => setEditTimeslotDate(event.target.value)}
+            />
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                size="sm"
+                disabled={editLoading || !editTimeslotDate}
+                onClick={() => void applyEdit(accessor, [editTimeslotDate])}
+              >
+                Save change
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                disabled={editLoading}
+                onClick={() => setEditingAccessor(null)}
+              >
+                Cancel
+              </Button>
+            </div>
+          </div>
+        );
+      }
     }
 
     if (accessor === "products") {
@@ -567,12 +694,29 @@ export function Summary({
 
   const startEdit = (accessor: string) => {
     setEditError(null);
+    if (accessor === "timeslots") {
+      setEditTimeslotDate(payload.timeslots[0] ?? "");
+    }
     setEditingAccessor(accessor);
   };
 
   const referenceId = bookResult
     ? referenceIdFromBookResult(bookResult.result)
     : null;
+
+  const primaryProductName = payload.products[0]
+    ? productLabel(payload.products[0].id, lineItems)
+    : undefined;
+
+  const calendarEventInput = {
+    timeslotValue: payload.timeslots[0] ?? "",
+    availableTimeslots,
+    productName: primaryProductName,
+    destinationCountry: payload.destinationCountry,
+    countryLabel: countryLabelWithFlag(payload.destinationCountry),
+    draftId: payload._appointmentRequestDraft,
+    referenceId,
+  };
 
   if (bookResult) {
     return (
@@ -585,6 +729,7 @@ export function Summary({
             countryLabel={countryLabelWithFlag(payload.destinationCountry)}
             timeslotLabel={timeslotLabel}
             referenceId={referenceId}
+            calendarEventInput={calendarEventInput}
             className="w-full"
           />
         </CardContent>
@@ -617,6 +762,26 @@ export function Summary({
         <ScrollArea className="min-h-0 flex-1">
           <div className="flex flex-col gap-4 px-4 py-4">
             <section className="grid gap-3 sm:grid-cols-2">
+              <div className="rounded-xl border border-border/60 bg-card p-3 shadow-sm sm:col-span-2">
+                <SectionHeader
+                  title="Preferred notary"
+                  accessor={
+                    preferredNotaryConfig.showPicker ? "preferredNotary" : undefined
+                  }
+                  onEdit={preferredNotaryConfig.showPicker ? startEdit : undefined}
+                  editing={editingAccessor === "preferredNotary"}
+                />
+                <p className="mt-1 font-medium text-foreground">
+                  {preferredNotaryLabel}
+                </p>
+                {!preferredNotaryConfig.showPicker && (
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Not configurable for this destination — using default (no
+                    preference).
+                  </p>
+                )}
+                {renderInlineEditor("preferredNotary")}
+              </div>
               <div className="rounded-xl border border-border/60 bg-card p-3 shadow-sm">
                 <SectionHeader
                   title="Destination"
@@ -799,76 +964,6 @@ export function Summary({
               </section>
             )}
 
-            {(consentConfig.showNewsletter || consentConfig.termsRequired) && (
-              <section className="rounded-xl border border-border/60 bg-card p-3 shadow-sm">
-                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                  Consent
-                </p>
-                <div className="mt-3 space-y-3">
-                  {consentConfig.showNewsletter && (
-                    <div className="flex items-start gap-3">
-                      <input
-                        id="summary-newsletter"
-                        type="checkbox"
-                        checked={newsletterOptIn}
-                        onChange={(event) =>
-                          setNewsletterOptIn(event.target.checked)
-                        }
-                        disabled={submitting}
-                        className="mt-0.5 size-4 shrink-0 rounded border border-input accent-primary"
-                      />
-                      <Label
-                        htmlFor="summary-newsletter"
-                        className="cursor-pointer text-sm leading-relaxed text-foreground"
-                      >
-                        Subscribe to the notarity newsletter
-                      </Label>
-                    </div>
-                  )}
-                  {consentConfig.termsRequired && (
-                    <div className="flex items-start gap-3">
-                      <input
-                        id="summary-terms"
-                        type="checkbox"
-                        checked={termsAccepted}
-                        onChange={(event) => {
-                          setTermsAccepted(event.target.checked);
-                          if (event.target.checked) {
-                            setConsentError(null);
-                          }
-                        }}
-                        disabled={submitting}
-                        className="mt-0.5 size-4 shrink-0 rounded border border-input accent-primary"
-                      />
-                      <Label
-                        htmlFor="summary-terms"
-                        className="cursor-pointer text-sm leading-relaxed text-foreground"
-                      >
-                        I accept the{" "}
-                        <a
-                          href="https://notarity.com/en/terms-and-conditions"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="font-medium text-primary underline-offset-2 hover:underline"
-                          onClick={(event) => event.stopPropagation()}
-                        >
-                          terms and conditions
-                        </a>
-                      </Label>
-                    </div>
-                  )}
-                </div>
-                {consentError && (
-                  <p
-                    role="alert"
-                    className="mt-3 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
-                  >
-                    {consentError}
-                  </p>
-                )}
-              </section>
-            )}
-
             {bookError && (
               <div
                 role="alert"
@@ -892,7 +987,71 @@ export function Summary({
         </ScrollArea>
       </CardContent>
 
-      <CardFooter className="flex-col gap-2 border-t border-border bg-card pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+      <CardFooter className="flex-col gap-3 border-t border-border bg-card px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-3">
+        {(consentConfig.showNewsletter || consentConfig.termsRequired) && (
+          <div className="w-full space-y-3 rounded-xl border border-border/60 bg-muted/30 p-3">
+            {consentConfig.termsRequired && (
+              <div className="flex items-start gap-3">
+                <input
+                  id="summary-terms"
+                  type="checkbox"
+                  checked={termsAccepted}
+                  onChange={(event) => {
+                    setTermsAccepted(event.target.checked);
+                    if (event.target.checked) {
+                      setConsentError(null);
+                    }
+                  }}
+                  disabled={submitting}
+                  className="mt-0.5 size-4 shrink-0 rounded border border-input accent-primary"
+                />
+                <Label
+                  htmlFor="summary-terms"
+                  className="cursor-pointer text-sm leading-relaxed text-foreground"
+                >
+                  I accept the{" "}
+                  <a
+                    href="https://notarity.com/en/terms-and-conditions"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="font-medium text-primary underline-offset-2 hover:underline"
+                    onClick={(event) => event.stopPropagation()}
+                  >
+                    terms and conditions
+                  </a>
+                </Label>
+              </div>
+            )}
+            {consentConfig.showNewsletter && (
+              <div className="flex items-start gap-3">
+                <input
+                  id="summary-newsletter"
+                  type="checkbox"
+                  checked={newsletterOptIn}
+                  onChange={(event) =>
+                    setNewsletterOptIn(event.target.checked)
+                  }
+                  disabled={submitting}
+                  className="mt-0.5 size-4 shrink-0 rounded border border-input accent-primary"
+                />
+                <Label
+                  htmlFor="summary-newsletter"
+                  className="cursor-pointer text-sm leading-relaxed text-foreground"
+                >
+                  Subscribe to the notarity newsletter (optional)
+                </Label>
+              </div>
+            )}
+            {consentError && (
+              <p
+                role="alert"
+                className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+              >
+                {consentError}
+              </p>
+            )}
+          </div>
+        )}
         <Button
           type="button"
           size="lg"

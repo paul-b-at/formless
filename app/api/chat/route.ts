@@ -35,6 +35,7 @@ const ChatRequestSchema = z.object({
           }),
         )
         .optional(),
+      timeslotFallback: z.boolean().optional(),
       sessionFiles: z.array(z.string()).optional(),
       sessionFileOwners: z.record(z.string()).optional(),
     })
@@ -72,6 +73,7 @@ function restoreState(
     productCatalog: input.productCatalog as EngineState["productCatalog"],
     availableTimeslots:
       input.availableTimeslots as EngineState["availableTimeslots"],
+    timeslotFallback: input.timeslotFallback as EngineState["timeslotFallback"],
     sessionFiles: input.sessionFiles as EngineState["sessionFiles"],
     sessionFileOwners: input.sessionFileOwners as EngineState["sessionFileOwners"],
   };

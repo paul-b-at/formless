@@ -1,4 +1,4 @@
-import type { PriceLineItem } from "./notarity-api";
+import type { PriceLineItem } from "./notarity";
 
 export type PriceDisplayLine = {
   name: string;

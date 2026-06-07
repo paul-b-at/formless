@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -6,29 +5,31 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
-import { AppointmentRequest } from "../lib/booking-schema";
-import { advance, type EngineState, type EngineStep } from "../lib/engine";
-import { parseBookingForm } from "../lib/form-interpreter";
 import {
-  getBookingForm,
-  priceRequest,
-  submitRequest,
-  sumNetToEuros,
-} from "../lib/notarity-api";
-
-const DEFAULT_SLUG = "start-vienna-hackathon";
-const REFERENCE_FILES_DIR = "notarity-reference";
-
-const sessions = new Map<string, EngineState>();
+  answerBooking,
+  getBookingPrice,
+  startBooking,
+  submitBooking,
+} from "./booking-session";
 
 const StartBookingInput = z.object({
   slug: z.string().min(1).optional(),
 });
 
-const AnswerInput = z.object({
+const AnswerInputSchema = z.object({
   sessionId: z.string().min(1),
-  userMessage: z.string().min(1),
+  userMessage: z.string().optional(),
+  structuredAnswer: z.record(z.unknown()).optional(),
+  uploadProductId: z.string().optional(),
+  uploadKind: z.enum(["file"]).optional(),
 });
+
+const AnswerInput = AnswerInputSchema.refine(
+  (input) =>
+    Boolean(input.structuredAnswer) ||
+    Boolean(input.userMessage?.trim()),
+  { message: "Provide userMessage or structuredAnswer" },
+);
 
 const SessionInput = z.object({
   sessionId: z.string().min(1),
@@ -39,14 +40,12 @@ const SubmitBookingInput = z.object({
   confirm: z.boolean(),
 });
 
-type Summary = {
-  sessionId: string;
-  collectedFields: string[];
-  missingFields: string[];
-  complete: boolean;
-  confirmedPrice?: number;
-  lastAssistantMessage?: string;
-};
+function textResult(text: string, structuredContent?: Record<string, unknown>) {
+  return {
+    content: [{ type: "text" as const, text }],
+    structuredContent,
+  };
+}
 
 async function loadEnvLocal(): Promise<void> {
   const envPath = join(process.cwd(), ".env.local");
@@ -67,82 +66,6 @@ async function loadEnvLocal(): Promise<void> {
   }
 }
 
-function textResult(text: string, structuredContent?: Record<string, unknown>) {
-  return {
-    content: [{ type: "text" as const, text }],
-    structuredContent,
-  };
-}
-
-function getSession(sessionId: string): EngineState {
-  const state = sessions.get(sessionId);
-  if (!state) {
-    throw new Error(`Unknown booking session: ${sessionId}`);
-  }
-  return state;
-}
-
-function summarize(
-  sessionId: string,
-  state: EngineState,
-  step?: EngineStep,
-): Summary {
-  const collected = state.collected;
-  const collectedFields = Object.keys(collected).sort();
-  const missingFields =
-    step?.type === "ask" ? [step.accessor] : [];
-  const lastAssistantMessage =
-    step?.type === "ask"
-      ? step.question
-      : state.messages.at(-1)?.role === "assistant"
-        ? state.messages.at(-1)?.content
-        : undefined;
-
-  return {
-    sessionId,
-    collectedFields,
-    missingFields,
-    complete: step?.type === "complete",
-    confirmedPrice:
-      typeof collected.confirmedPrice === "number"
-        ? collected.confirmedPrice
-        : state.pricing?.euroTotal,
-    lastAssistantMessage,
-  };
-}
-
-function zodIssues(error: z.ZodError): string[] {
-  return error.issues.map((issue) => {
-    const path = issue.path.length ? issue.path.join(".") : "payload";
-    return `${path}: ${issue.message}`;
-  });
-}
-
-function buildPayloadForPricing(state: EngineState) {
-  const parsed = AppointmentRequest.safeParse({
-    ...state.collected,
-    confirmedPrice: state.collected.confirmedPrice ?? 0,
-  });
-
-  if (!parsed.success) {
-    return { ok: false as const, issues: zodIssues(parsed.error) };
-  }
-
-  return { ok: true as const, payload: parsed.data };
-}
-
-async function getUploadedFiles(state: EngineState) {
-  const fileNames = state.collected.products?.flatMap((product) => product.files) ?? [];
-  const uniqueFileNames = [...new Set(fileNames)];
-
-  return Promise.all(
-    uniqueFileNames.map(async (name) => ({
-      name,
-      data: await readFile(join(process.cwd(), REFERENCE_FILES_DIR, name)),
-    })),
-  );
-}
-
 const server = new McpServer({
   name: "formless-notarity-booking",
   version: "0.1.0",
@@ -153,32 +76,15 @@ server.registerTool(
   {
     title: "Start Notarity booking",
     description:
-      "Start a schema-driven Notarity booking session using the Formless engine.",
+      "Start a schema-driven Notarity booking session using the Formless engine (advance + live form schema).",
     inputSchema: StartBookingInput.shape,
   },
   async ({ slug }) => {
-    const rawForm = await getBookingForm(slug ?? DEFAULT_SLUG);
-    const form = parseBookingForm(rawForm);
-    const sessionId = randomUUID();
-    const initialState: EngineState = {
-      form,
-      collected: {},
-      messages: [],
-    };
-
-    const { state, step } = await advance(initialState, "");
-    sessions.set(sessionId, state);
-
-    const summary = summarize(sessionId, state, step);
-    const text =
-      step.type === "ask"
-        ? `Started booking session ${sessionId}.\n\n${step.question}`
-        : `Started booking session ${sessionId}. The booking payload is complete.`;
-
-    return textResult(text, {
-      sessionId,
-      step,
-      stateSummary: summary,
+    const result = await startBooking(slug);
+    return textResult(result.text, {
+      sessionId: result.sessionId,
+      step: result.step,
+      stateSummary: result.summary,
     });
   },
 );
@@ -188,36 +94,30 @@ server.registerTool(
   {
     title: "Answer booking question",
     description:
-      "Send the user's next answer through the existing Formless booking engine.",
-    inputSchema: AnswerInput.shape,
+      "Send the user's next answer through advance() in lib/engine.ts. For per-product file uploads, pass uploadKind: \"file\" and uploadProductId from the fileUpload step.",
+    inputSchema: AnswerInputSchema.shape,
   },
-  async ({ sessionId, userMessage }) => {
-    const state = getSession(sessionId);
-    const result = await advance(state, userMessage);
-    sessions.set(sessionId, result.state);
+  async ({
+    sessionId,
+    userMessage,
+    structuredAnswer,
+    uploadProductId,
+    uploadKind,
+  }) => {
+    const result = await answerBooking({
+      sessionId,
+      userMessage: userMessage?.trim() ?? "",
+      structuredAnswer,
+      uploadProductId,
+      uploadKind,
+    });
 
-    const summary = summarize(sessionId, result.state, result.step);
-    const text =
-      result.step.type === "ask"
-        ? [
-            result.step.question,
-            "",
-            `Collected fields: ${summary.collectedFields.join(", ") || "none"}`,
-            `Missing fields: ${summary.missingFields.join(", ") || "none"}`,
-            `Complete: ${summary.complete ? "yes" : "no"}`,
-          ].join("\n")
-        : [
-            "The booking payload is complete.",
-            `Confirmed price: €${result.step.payload.confirmedPrice}`,
-            `Collected fields: ${summary.collectedFields.join(", ") || "none"}`,
-            "Use get_price before submit_booking.",
-          ].join("\n");
-
-    return textResult(text, {
+    return textResult(result.text, {
       sessionId,
       step: result.step,
       collected: result.state.collected,
-      stateSummary: summary,
+      sessionFileOwners: result.state.sessionFileOwners,
+      stateSummary: result.summary,
     });
   },
 );
@@ -227,46 +127,25 @@ server.registerTool(
   {
     title: "Get Notarity price",
     description:
-      "Price the current booking payload with the existing Notarity pricing helper.",
+      "Price the current booking payload via priceRequest() — never computed locally.",
     inputSchema: SessionInput.shape,
   },
   async ({ sessionId }) => {
-    const state = getSession(sessionId);
-    const pricingPayload = buildPayloadForPricing(state);
-
-    if (!pricingPayload.ok) {
-      return textResult(
-        `The booking payload is not ready for pricing.\n\nMissing or invalid fields:\n${pricingPayload.issues
-          .map((issue) => `- ${issue}`)
-          .join("\n")}`,
-        {
-          sessionId,
-          ready: false,
-          issues: pricingPayload.issues,
-        },
-      );
+    const result = await getBookingPrice(sessionId);
+    if (!result.ok) {
+      return textResult(result.text, {
+        sessionId,
+        ready: false,
+        issues: result.issues,
+      });
     }
 
-    const lineItems = await priceRequest(pricingPayload.payload);
-    const euroTotal = sumNetToEuros(lineItems);
-    const updatedPayload = AppointmentRequest.parse({
-      ...pricingPayload.payload,
-      confirmedPrice: euroTotal,
-    });
-
-    const nextState: EngineState = {
-      ...state,
-      collected: updatedPayload,
-      pricing: { lineItems, euroTotal },
-    };
-    sessions.set(sessionId, nextState);
-
-    return textResult(`Notarity returned a total price of €${euroTotal}.`, {
+    return textResult(result.text, {
       sessionId,
       ready: true,
-      confirmedPrice: euroTotal,
-      lineItems,
-      stateSummary: summarize(sessionId, nextState),
+      confirmedPrice: result.euroTotal,
+      lineItems: result.lineItems,
+      stateSummary: result.summary,
     });
   },
 );
@@ -276,55 +155,20 @@ server.registerTool(
   {
     title: "Submit Notarity booking",
     description:
-      "Submit the current booking payload through the existing Notarity appointment helper.",
+      "confirm: false returns a dry-run preview (payload + price). confirm: true submits in debug mode with the test draft id.",
     inputSchema: SubmitBookingInput.shape,
   },
   async ({ sessionId, confirm }) => {
-    if (!confirm) {
-      return textResult(
-        "Submission was not confirmed. No booking was submitted.",
-        { sessionId, submitted: false },
-      );
-    }
-
-    const state = getSession(sessionId);
-    const pricingPayload = buildPayloadForPricing(state);
-    if (!pricingPayload.ok) {
-      return textResult(
-        `The booking payload is not ready to submit.\n\nMissing or invalid fields:\n${pricingPayload.issues
-          .map((issue) => `- ${issue}`)
-          .join("\n")}`,
-        {
-          sessionId,
-          submitted: false,
-          issues: pricingPayload.issues,
-        },
-      );
-    }
-
-    const lineItems = await priceRequest(pricingPayload.payload);
-    const euroTotal = sumNetToEuros(lineItems);
-    const payload = AppointmentRequest.parse({
-      ...pricingPayload.payload,
-      mode: "debug",
-      confirmedPrice: euroTotal,
-    });
-    const files = await getUploadedFiles({ ...state, collected: payload });
-    const result = await submitRequest(payload, files);
-
-    const nextState: EngineState = {
-      ...state,
-      collected: payload,
-      pricing: { lineItems, euroTotal },
-    };
-    sessions.set(sessionId, nextState);
-
-    return textResult(`Booking submitted in debug mode. Confirmed price: €${euroTotal}.`, {
+    const result = await submitBooking(sessionId, confirm);
+    return textResult(result.text, {
       sessionId,
-      submitted: true,
-      confirmedPrice: euroTotal,
-      lineItems,
-      result,
+      submitted: result.submitted,
+      dryRun: result.dryRun,
+      confirmedPrice: result.euroTotal,
+      lineItems: result.lineItems,
+      payload: result.payload,
+      issues: result.issues,
+      result: result.result,
     });
   },
 );

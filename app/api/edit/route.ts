@@ -33,6 +33,8 @@ const EditRequestSchema = z.object({
         }),
       )
       .optional(),
+    sessionFiles: z.array(z.string()).optional(),
+    sessionFileOwners: z.record(z.string()).optional(),
   }),
   accessor: z.string(),
   value: z.unknown(),
@@ -49,6 +51,9 @@ export async function POST(request: Request): Promise<NextResponse> {
       productCatalog: body.state.productCatalog as EngineState["productCatalog"],
       availableTimeslots:
         body.state.availableTimeslots as EngineState["availableTimeslots"],
+      sessionFiles: body.state.sessionFiles as EngineState["sessionFiles"],
+      sessionFileOwners:
+        body.state.sessionFileOwners as EngineState["sessionFileOwners"],
     };
 
     const { state, step } = await applySurgicalEdit(

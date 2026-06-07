@@ -15,6 +15,7 @@ import {
 } from "../lib/engine";
 import { parseBookingForm } from "../lib/form-interpreter";
 import { getBookingForm, priceRequest, sumNetToEuros } from "../lib/notarity";
+import { describeRememberedEmailPrefill } from "../lib/remembered-email";
 
 const JOSHUA_BILLING = {
   firstName: "Joshua",
@@ -28,6 +29,12 @@ const JOSHUA_BILLING = {
   stateProvince: "NY",
   countryCode: "US",
 };
+
+function tomorrowIsoDate(): string {
+  const date = new Date();
+  date.setUTCDate(date.getUTCDate() + 1);
+  return date.toISOString().slice(0, 10);
+}
 
 const JOSHUA_SHIPPING = {
   shippingDetailsSameAsBillingDetails: false,
@@ -182,18 +189,23 @@ function nextScriptedAnswer(
     return { userMessage: next.value };
   }
 
-  if (step.type === "consent") {
+  if (step.type === "datePicker") {
     return {
       userMessage: "",
-      structuredAnswer: { newsletter: false, termsAccepted: true },
+      structuredAnswer: { date: tomorrowIsoDate() },
     };
   }
 
   if (step.type !== "ask") {
-    throw new Error(`Expected ask, participants, fileUpload, or consent step, got ${step.type}`);
+    throw new Error(
+      `Expected ask, participants, fileUpload, or datePicker step, got ${step.type}`,
+    );
   }
 
   const accessor = step.accessor;
+  if (accessor === "preferredNotary") {
+    return { userMessage: "No preference" };
+  }
   if (accessor === "timeslots") {
     const slotId = state.availableTimeslots?.[0]?.id;
     if (!slotId) {
@@ -214,6 +226,14 @@ async function main(): Promise<void> {
   resetEngineGeminiCallCount();
 
   console.log("Engine replay: Joshua/Spain flow…\n");
+  for (const line of describeRememberedEmailPrefill(JOSHUA_BILLING.email, [
+    "participants[0].email",
+    "billingDetails.email",
+    "contactDetails.email",
+  ])) {
+    console.log(`Remembered email prefill: ${line}`);
+  }
+  console.log("");
 
   const rawForm = await getBookingForm("start-vienna-hackathon");
   const form = parseBookingForm(rawForm);
@@ -270,6 +290,10 @@ async function main(): Promise<void> {
         process.exit(1);
       }
 
+      if (process.env.TIMESLOT_FETCH_MOCK === "fail") {
+        console.log("Timeslot (date fallback):", payload.timeslots[0]);
+      }
+
       console.log("\nEngine replay passed.");
       console.log(`Gemini API calls this run: ${getEngineGeminiCallCount()}`);
       return;
@@ -280,11 +304,11 @@ async function main(): Promise<void> {
         ? `FORM [${result.accessor}]: ${result.title}`
         : result.type === "participants"
           ? `PARTICIPANTS [${result.accessor}]: ${result.title}`
-          : result.type === "consent"
-            ? `CONSENT [${result.accessor}]: ${result.title}`
-            : result.type === "fileUpload"
+          : result.type === "fileUpload"
               ? `UPLOAD [${result.productId}] ${result.productLabel}: ${result.question}`
-              : `ASK [${result.accessor}]: ${result.question}`;
+              : result.type === "datePicker"
+                ? `DATE [${result.accessor}]: ${result.title}`
+                : `ASK [${result.accessor}]: ${result.question}`;
     console.log(label);
     if (result.euroTotal !== undefined) {
       console.log(`  (running price: €${result.euroTotal})`);

@@ -9,6 +9,7 @@ import {
 } from "./gemini-ocr";
 import {
   catalogProductOptions,
+  hasOcrProductSuggestion,
   isCatalogProductId,
   mapDocumentHintToProduct,
   type ProductMapResult,
@@ -54,6 +55,7 @@ const OCR_RESPONSE_SCHEMA = {
             city: { type: Type.STRING, nullable: true },
             stateProvince: { type: Type.STRING, nullable: true },
             countryCode: { type: Type.STRING, nullable: true },
+            companyName: { type: Type.STRING, nullable: true },
           },
         },
       },
@@ -61,18 +63,40 @@ const OCR_RESPONSE_SCHEMA = {
   },
 } as const;
 
+function readLocalizedField(
+  value: unknown,
+  fallback = "",
+): Record<string, string> | undefined {
+  if (typeof value === "object" && value !== null) {
+    const en = (value as Record<string, unknown>).en;
+    if (typeof en === "string" && en.trim()) {
+      return { en: en.trim() };
+    }
+    return undefined;
+  }
+  if (typeof value === "string" && value.trim()) {
+    return { en: value.trim() };
+  }
+  if (fallback.trim()) {
+    return { en: fallback.trim() };
+  }
+  return undefined;
+}
+
 function normalizeProductDefs(raw: Record<string, unknown>[]): ProductDefinition[] {
-  return raw.map((product) => ({
-    id: String(product.id ?? product._id ?? ""),
-    title: {
-      en:
-        typeof product.title === "object" && product.title !== null
-          ? String((product.title as Record<string, unknown>).en ?? "")
-          : String(product.title ?? product.name ?? product.id ?? ""),
-    },
-    apostilleRequired: Boolean(product.apostilleRequired),
-    fileUploadRequired: Boolean(product.fileUploadRequired),
-  }));
+  return raw.map((product) => {
+    const id = String(product.id ?? product._id ?? "");
+    const title =
+      readLocalizedField(product.title, String(product.name ?? product.id ?? "")) ??
+      { en: id };
+    return {
+      id,
+      title,
+      description: readLocalizedField(product.description),
+      apostilleRequired: Boolean(product.apostilleRequired),
+      fileUploadRequired: Boolean(product.fileUploadRequired),
+    };
+  });
 }
 
 function countryLabel(code: string): string {
@@ -94,10 +118,12 @@ async function loadCatalogForCountry(
   return normalizeProductDefs(products as Record<string, unknown>[]);
 }
 
-async function loadCountryOptions(): Promise<{ code: string; label: string }[]> {
+async function loadCountryOptions(
+  ensureCodes?: string[],
+): Promise<{ code: string; label: string }[]> {
   const rawForm = await getBookingForm(FORM_SLUG);
   const form = parseBookingForm(rawForm);
-  return getCountryOptions(form).map((country) => ({
+  return getCountryOptions(form, { ensureCodes }).map((country) => ({
     code: country.code,
     label: country.label,
   }));
@@ -108,7 +134,7 @@ function buildOcrPrompt(fileName: string): string {
 - destinationCountry: ISO-3166 alpha-2 country code where the document will be used (e.g. ES for Spain, AT for Austria)
 - productHint: what KIND of document this is in plain English (e.g. "Power of Attorney", "passport copy") — NOT a booking product name
 - purposeHint: the document's stated PURPOSE or end goal (e.g. "obtaining a Spanish NIE", "company formation", "property purchase") — read what the doc is FOR, not only what it is called
-- extracted.party: any obvious person details (firstName, lastName, email, phoneNumber, address, zipCode, city, stateProvince, countryCode as ISO-2)
+- extracted.party: any obvious person/company details (firstName, lastName, email, phoneNumber, address, zipCode, city, stateProvince, countryCode as ISO-2, companyName when the document names a business)
 - extracted.documentType: document type in plain English
 - extracted.summary: one sentence describing the document and its goal
 - confidence: high | medium | low
@@ -164,14 +190,16 @@ async function enrichMappedProduct(
   }
 
   if (
-    mapped.productId &&
+    hasOcrProductSuggestion(mapped) &&
     mapped.productTitle &&
-    isCatalogProductId(mapped.productId, catalog)
+    mapped.suggestedProductId &&
+    isCatalogProductId(mapped.suggestedProductId, catalog)
   ) {
     return {
-      productId: mapped.productId,
       productTitle: mapped.productTitle,
-      suggestedProductId: mapped.suggestedProductId ?? mapped.productId,
+      suggestedProductId: mapped.suggestedProductId,
+      productConfidence: mapped.productConfidence,
+      productMatchReason: mapped.productMatchReason,
       productOptions,
     };
   }
@@ -193,8 +221,57 @@ function parseGeminiExtraction(
   }
 }
 
+function inferCachedProductConfidence(
+  cached: OcrResponse,
+): OcrResponse["productConfidence"] {
+  if (cached.productConfidence) {
+    return cached.productConfidence;
+  }
+  if (cached.ambiguousProduct) {
+    return "medium";
+  }
+  if (cached.suggestedProductId || cached.productId) {
+    return "high";
+  }
+  return undefined;
+}
+
+function hydrateCachedSuggestion(cached: OcrResponse): Partial<OcrResponse> {
+  const suggestedProductId =
+    cached.suggestedProductId ?? cached.productId ?? undefined;
+  const productConfidence = inferCachedProductConfidence({
+    ...cached,
+    suggestedProductId,
+  });
+  const suggestion = {
+    suggestedProductId,
+    productConfidence,
+    ambiguousProduct: cached.ambiguousProduct,
+  };
+
+  if (!hasOcrProductSuggestion(suggestion)) {
+    return {
+      productId: undefined,
+      productTitle: undefined,
+      suggestedProductId: undefined,
+      productConfidence: undefined,
+      productMatchReason: undefined,
+    };
+  }
+
+  return {
+    productId: undefined,
+    productTitle: cached.productTitle,
+    suggestedProductId,
+    productConfidence,
+    productMatchReason: cached.productMatchReason,
+  };
+}
+
 async function hydrateCachedResponse(cached: OcrResponse): Promise<OcrResponse> {
-  const countryOptions = await loadCountryOptions();
+  const countryOptions = await loadCountryOptions(
+    cached.destinationCountry ? [cached.destinationCountry] : undefined,
+  );
   const catalog = cached.destinationCountry
     ? await loadCatalogForCountry(cached.destinationCountry)
     : [];
@@ -203,6 +280,7 @@ async function hydrateCachedResponse(cached: OcrResponse): Promise<OcrResponse> 
 
   return normalizeOcrResponse({
     ...cached,
+    ...hydrateCachedSuggestion(cached),
     destinationCountryLabel: cached.destinationCountry
       ? countryLabel(cached.destinationCountry)
       : cached.destinationCountryLabel,
@@ -218,7 +296,13 @@ async function toOcrResponse(
   },
   notice?: string,
 ): Promise<OcrResponse> {
-  const countryOptions = await loadCountryOptions();
+  const inferredCountry =
+    typeof parsed?.destinationCountry === "string"
+      ? parsed.destinationCountry.trim().toUpperCase()
+      : undefined;
+  const countryOptions = await loadCountryOptions(
+    inferredCountry ? [inferredCountry] : undefined,
+  );
 
   if (!parsed) {
     return normalizeOcrResponse({ notice, countryOptions });
@@ -243,9 +327,16 @@ async function toOcrResponse(
       : undefined,
     productHint: productHint || undefined,
     purposeHint: purposeHint || undefined,
-    productId: mapped.ambiguous ? undefined : mapped.productId,
-    productTitle: mapped.ambiguous ? undefined : mapped.productTitle,
-    suggestedProductId: mapped.suggestedProductId,
+    productTitle: hasOcrProductSuggestion(mapped) ? mapped.productTitle : undefined,
+    suggestedProductId: hasOcrProductSuggestion(mapped)
+      ? mapped.suggestedProductId
+      : undefined,
+    productConfidence: hasOcrProductSuggestion(mapped)
+      ? mapped.productConfidence
+      : undefined,
+    productMatchReason: hasOcrProductSuggestion(mapped)
+      ? mapped.productMatchReason
+      : undefined,
     alternativeProductIds: mapped.alternativeProductIds,
     ambiguousProduct: mapped.ambiguous ? true : undefined,
     countryOptions,
@@ -270,7 +361,7 @@ export async function inferFromDocument(args: {
     const countryOptions = await loadCountryOptions();
     const key = ocrCacheKey(args.fileName);
     return normalizeOcrResponse({
-      notice: `No OCR cache for "${args.fileName}". Add .ocr-cache/${key}.json or unset OCR_MOCK.`,
+      notice: `No OCR cache for "${args.fileName}". Add fixtures/ocr/${key}.json, .ocr-cache/${key}.json, or unset OCR_MOCK.`,
       countryOptions,
     });
   }

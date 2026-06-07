@@ -68,12 +68,9 @@ describe("consent-config", () => {
     expect(config.showNewsletter).toBe(false);
   });
 
-  test("pendingConsentComponents lists unfilled consent fields", () => {
+  test("pendingConsentComponents stays empty — consents collected in Review only", () => {
     const pending = pendingConsentComponents(summaryPageForm, {});
-    expect(pending.map((component) => component.type).sort()).toEqual([
-      "confirmTC",
-      "newsletter",
-    ]);
+    expect(pending).toHaveLength(0);
 
     const filled = pendingConsentComponents(summaryPageForm, {
       newsletter: false,

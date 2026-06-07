@@ -40,11 +40,6 @@ import {
 import { GEMINI_MODEL } from "./gemini-model";
 import { mapDocumentHintToProduct } from "./ocr-product-map";
 import { clearDependentsOf } from "./collected-edit";
-import {
-  getConsentConfig,
-  isConsentComponent,
-  type ConsentConfig,
-} from "./consent-config";
 import { validateAnswer } from "./field-validation";
 import { sanitizeCollected } from "./party-sanitize";
 import {
@@ -53,8 +48,14 @@ import {
   type LabeledOption,
 } from "./timeslot-format";
 import {
+  dateToTimeslotPayloadValue,
+  fallbackDateBounds,
+  loadTimeslotsResilient,
+  parseTimeslotDateAnswer,
+  TIMESLOT_DATE_PAYLOAD_FORMAT,
+} from "./timeslot-fallback";
+import {
   getProductsByTags,
-  getTimeslots,
   priceRequest,
   sumNetToEuros,
   type PriceLineItem,
@@ -106,6 +107,8 @@ export type EngineState = {
   pricing?: { lineItems: PriceLineItem[]; euroTotal: number };
   productCatalog?: ProductDefinition[];
   availableTimeslots?: { id: string; startTime: string }[];
+  /** When true, timeslot API failed/empty — collect a date mapped into timeslots[]. */
+  timeslotFallback?: boolean;
   /** Filenames already uploaded in this chat — reused for product file requirements. */
   sessionFiles?: string[];
   /** Maps each session filename to the product id it belongs to (no cross-product reuse). */
@@ -151,13 +154,11 @@ export type EngineStep =
       euroTotal?: number;
     }
   | {
-      type: "consent";
-      accessor: "consent";
+      type: "datePicker";
+      accessor: "timeslots";
       title: string;
-      termsRequired: boolean;
-      showNewsletter: boolean;
-      newsletter?: boolean;
-      termsAccepted?: boolean;
+      minDate: string;
+      maxDate: string;
       error?: string;
       lineItems?: PriceLineItem[];
       euroTotal?: number;
@@ -238,6 +239,10 @@ function normalizeCollected(
 
   delete next.termsAccepted;
 
+  if (next.newsletter === undefined) {
+    next.newsletter = false;
+  }
+
   next.preferredNotary = resolvePreferredNotaryValue(form, next, catalog);
 
   return stripParticipantMeta(next);
@@ -297,6 +302,7 @@ async function loadProductCatalog(
   const fromTags = products.map((p) => ({
     id: String(p.id),
     title: (p.title as Record<string, string>) ?? {},
+    description: (p.description as Record<string, string> | undefined) ?? undefined,
     apostilleRequired: Boolean(p.apostilleRequired),
     showApostille: Boolean(p.showApostille),
     fileUploadRequired: Boolean(p.fileUploadRequired),
@@ -309,26 +315,18 @@ async function loadProductCatalog(
   return [...byId.values()];
 }
 
-async function loadTimeslots(
+async function loadTimeslotContext(
   form: BookingFormSchema,
   collected: Collected,
-): Promise<{ id: string; startTime: string }[]> {
-  const label = getTimeslotLabel(form, collected);
-  if (!label) {
-    return [];
-  }
-  const start = new Date();
-  start.setUTCHours(0, 0, 0, 0);
-  const end = new Date(start);
-  end.setUTCDate(end.getUTCDate() + 7);
-  const slots = await getTimeslots({
-    timeslotLabel: label,
-    startDate: start.toISOString(),
-    endDate: end.toISOString(),
-  });
-  return slots
-    .filter((s) => s.available > 0)
-    .map((s) => ({ id: s.id, startTime: s.startTime }));
+): Promise<{
+  availableTimeslots: { id: string; startTime: string }[];
+  timeslotFallback: boolean;
+}> {
+  const result = await loadTimeslotsResilient(form, collected);
+  return {
+    availableTimeslots: result.slots,
+    timeslotFallback: result.fallback,
+  };
 }
 
 function deriveParticipants(collected: Collected): Collected {
@@ -377,8 +375,6 @@ function buildPricingPayload(
   });
 }
 
-let loggedPriceResponse = false;
-
 async function refreshPricing(
   form: BookingFormSchema,
   collected: Collected,
@@ -394,13 +390,6 @@ async function refreshPricing(
       collected.confirmedPrice ?? 0,
     );
     const lineItems = await priceRequest(payload);
-    if (!loggedPriceResponse) {
-      console.log(
-        "[price] Full /price response:",
-        JSON.stringify(lineItems, null, 2),
-      );
-      loggedPriceResponse = true;
-    }
     return { lineItems, euroTotal: sumNetToEuros(lineItems) };
   } catch {
     return undefined;
@@ -967,8 +956,32 @@ function shouldEmitParticipantsStep(component: Component): boolean {
   return accessor === "participants";
 }
 
-function shouldEmitConsentStep(component: Component): boolean {
-  return isConsentComponent(component);
+function shouldEmitTimeslotDateStep(
+  component: Component,
+  timeslotFallback: boolean,
+): boolean {
+  if (!timeslotFallback) {
+    return false;
+  }
+  const accessor = component.accessor ?? component.type;
+  return accessor === "timeslots" || component.type === "timeSlots";
+}
+
+function buildDatePickerStep(
+  pricing?: PricingSlice,
+  error?: string,
+): Extract<EngineStep, { type: "datePicker" }> {
+  const bounds = fallbackDateBounds();
+  return {
+    type: "datePicker",
+    accessor: "timeslots",
+    title: "Choose your preferred appointment date",
+    minDate: bounds.min,
+    maxDate: bounds.max,
+    error,
+    lineItems: pricing?.lineItems,
+    euroTotal: pricing?.euroTotal,
+  };
 }
 
 function buildPreferredNotaryStep(
@@ -993,136 +1006,6 @@ function buildPreferredNotaryStep(
     options,
     lineItems: pricing?.lineItems,
     euroTotal: pricing?.euroTotal,
-  };
-}
-
-function buildConsentStep(
-  form: BookingFormSchema,
-  collected: Collected,
-  pricing?: PricingSlice,
-): Extract<EngineStep, { type: "consent" }> {
-  const config = getConsentConfig(form, collected);
-  return {
-    type: "consent",
-    accessor: "consent",
-    title: "Almost done — confirm the details below",
-    termsRequired: config.termsRequired,
-    showNewsletter: config.showNewsletter,
-    newsletter: collected.newsletter,
-    termsAccepted: collected.termsAccepted,
-    lineItems: pricing?.lineItems,
-    euroTotal: pricing?.euroTotal,
-  };
-}
-
-type ConsentStructuredAnswer = {
-  newsletter?: boolean;
-  termsAccepted?: boolean;
-};
-
-function parseConsentStructuredAnswer(
-  value: Record<string, unknown>,
-): ConsentStructuredAnswer {
-  const answer: ConsentStructuredAnswer = {};
-  if ("newsletter" in value) {
-    answer.newsletter = Boolean(value.newsletter);
-  }
-  if ("termsAccepted" in value) {
-    answer.termsAccepted = Boolean(value.termsAccepted);
-  }
-  return answer;
-}
-
-function validateConsentAnswer(
-  config: ConsentConfig,
-  answer: ConsentStructuredAnswer,
-  collected: Collected,
-): { ok: true } | { ok: false; message: string } {
-  const termsAccepted =
-    answer.termsAccepted ?? collected.termsAccepted ?? false;
-  if (config.termsRequired && !termsAccepted) {
-    return {
-      ok: false,
-      message: "Please accept the terms and conditions to continue.",
-    };
-  }
-  if (config.showNewsletter && answer.newsletter === undefined) {
-    const hasNewsletter = collected.newsletter !== undefined;
-    if (!hasNewsletter) {
-      return {
-        ok: false,
-        message: "Please choose whether you want the newsletter.",
-      };
-    }
-  }
-  return { ok: true };
-}
-
-function applyConsentAnswer(
-  form: BookingFormSchema,
-  collected: Collected,
-  answer: ConsentStructuredAnswer,
-  config: ConsentConfig,
-  catalog: ProductDefinition[] = [],
-): Collected {
-  let next: Collected = { ...collected };
-
-  if (config.showNewsletter && answer.newsletter !== undefined) {
-    const newsletterComponent = config.newsletterComponent;
-    if (newsletterComponent) {
-      next = applyAnswer(
-        form,
-        next,
-        newsletterComponent,
-        answer.newsletter,
-        catalog,
-      );
-    } else {
-      next.newsletter = answer.newsletter;
-    }
-  }
-
-  if (config.termsRequired && answer.termsAccepted !== undefined) {
-    const termsComponent = config.termsComponent;
-    if (termsComponent) {
-      next = applyAnswer(
-        form,
-        next,
-        termsComponent,
-        answer.termsAccepted,
-        catalog,
-      );
-    } else {
-      next.termsAccepted = answer.termsAccepted;
-    }
-  } else if (!config.termsRequired) {
-    next.termsAccepted = true;
-  }
-
-  return next;
-}
-
-function parseConsentTextAnswer(
-  message: string,
-  collected: Collected,
-  config: ConsentConfig,
-): ConsentStructuredAnswer | null {
-  const lower = message.trim().toLowerCase();
-  const affirmative = [
-    "yes",
-    "accept",
-    "i accept",
-    "agree",
-    "i agree",
-    "ok",
-    "okay",
-  ];
-  if (!affirmative.some((token) => lower.includes(token))) {
-    return null;
-  }
-  return {
-    termsAccepted: true,
-    newsletter: collected.newsletter ?? false,
   };
 }
 
@@ -1207,6 +1090,17 @@ function getOptionsForComponent(
         asOption("No hard copy needed"),
         asOption("Express shipping only, no hard copy"),
       ];
+    case "preferredNotary": {
+      const config = getPreferredNotaryConfig(form, collected, catalog);
+      const options: StepOption[] = [];
+      if (!config.required) {
+        options.push(asOption("No preference", PREFERRED_NOTARY_DEFAULT));
+      }
+      for (const option of config.options) {
+        options.push(asOption(option.label, option.id));
+      }
+      return options;
+    }
     default:
       break;
   }
@@ -1318,6 +1212,7 @@ function buildStepFromComponent(
   catalog: ProductDefinition[],
   slots: { id: string; startTime: string }[],
   pricing?: PricingSlice,
+  timeslotFallback = false,
 ): EngineStep {
   const fileUpload = tryBuildFileUploadStep(component, collected, catalog, pricing);
   if (fileUpload) {
@@ -1333,8 +1228,8 @@ function buildStepFromComponent(
     );
   }
 
-  if (shouldEmitConsentStep(component)) {
-    return buildConsentStep(form, collected, pricing);
+  if (shouldEmitTimeslotDateStep(component, timeslotFallback)) {
+    return buildDatePickerStep(pricing);
   }
 
   const question = formatQuestion(component, catalog, slots, collected);
@@ -1391,7 +1286,7 @@ function formatQuestion(
           .map((s) => formatTimeslotLabel(s.startTime))
           .join(", ")}`;
       }
-      return "When would you like your appointment?";
+      return `Live times aren't available right now — pick your preferred appointment date (${TIMESLOT_DATE_PAYLOAD_FORMAT}).`;
     case "contactDetails":
       return "Should we use the same contact details as billing?";
     case "hardCopy":
@@ -1440,6 +1335,7 @@ function rejectValidation(
     pricing: state.pricing,
     productCatalog,
     availableTimeslots,
+    timeslotFallback: state.timeslotFallback,
     sessionFiles: state.sessionFiles,
     sessionFileOwners: state.sessionFileOwners,
   };
@@ -1483,10 +1379,10 @@ function rejectValidation(
     };
   }
 
-  if (shouldEmitConsentStep(current)) {
+  if (shouldEmitTimeslotDateStep(current, state.timeslotFallback ?? false)) {
     return {
       state: newState,
-      step: { ...buildConsentStep(form, collected, state.pricing), error: errorMessage },
+      step: buildDatePickerStep(state.pricing, errorMessage),
     };
   }
 
@@ -1498,11 +1394,14 @@ function rejectValidation(
     productCatalog,
     availableTimeslots,
     state.pricing,
+    state.timeslotFallback ?? false,
   );
 
   let errorStep: EngineStep = step;
   if (step.type === "ask" || step.type === "fileUpload") {
     errorStep = { ...step, question: errorMessage };
+  } else if (step.type === "datePicker") {
+    errorStep = { ...step, error: errorMessage };
   }
 
   return {
@@ -1567,7 +1466,10 @@ export async function advance(
   let sessionFileOwners = { ...(state.sessionFileOwners ?? {}) };
 
   let productCatalog = await loadProductCatalog(form, collected);
-  let availableTimeslots = await loadTimeslots(form, collected);
+  let { availableTimeslots, timeslotFallback } = await loadTimeslotContext(
+    form,
+    collected,
+  );
 
   collected = applyCollectedUpdates(
     form,
@@ -1585,11 +1487,30 @@ export async function advance(
   if (structuredAnswer && current) {
     const accessor = current.accessor ?? current.type;
 
-    if (isConsentComponent(current)) {
-      const config = getConsentConfig(form, collected);
-      const parsed = parseConsentStructuredAnswer(structuredAnswer);
-      const validation = validateConsentAnswer(config, parsed, collected);
-      if (!validation.ok) {
+    if (
+      (accessor === "timeslots" || current.type === "timeSlots") &&
+      typeof structuredAnswer.date === "string"
+    ) {
+      try {
+        const payloadValue = dateToTimeslotPayloadValue(structuredAnswer.date);
+        const before = { ...collected };
+        collected = applyAnswer(
+          form,
+          collected,
+          current,
+          [payloadValue],
+          productCatalog,
+        );
+        if (selectionChanged(before, collected)) {
+          const refreshed = await refreshPricing(form, collected);
+          if (refreshed) {
+            collected = { ...collected, confirmedPrice: refreshed.euroTotal };
+            pricing = refreshed;
+          }
+        }
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Invalid date";
         return rejectValidation(
           state,
           form,
@@ -1597,25 +1518,10 @@ export async function advance(
           current,
           userMessage,
           structuredAnswer,
-          validation.message,
+          message,
           productCatalog,
           availableTimeslots,
         );
-      }
-      const before = { ...collected };
-      collected = applyConsentAnswer(
-        form,
-        collected,
-        parsed,
-        config,
-        productCatalog,
-      );
-      if (selectionChanged(before, collected)) {
-        const refreshed = await refreshPricing(form, collected);
-        if (refreshed) {
-          collected = { ...collected, confirmedPrice: refreshed.euroTotal };
-          pricing = refreshed;
-        }
       }
     } else if (accessor === "participants") {
       const setup = getParticipantSetup(current);
@@ -1701,7 +1607,10 @@ export async function advance(
       attachedFile = findNewlyAttachedFile(before, collected);
     }
     productCatalog = await loadProductCatalog(form, collected);
-    availableTimeslots = await loadTimeslots(form, collected);
+    ({ availableTimeslots, timeslotFallback } = await loadTimeslotContext(
+      form,
+      collected,
+    ));
 
     if (selectionChanged(before, collected)) {
       const refreshed = await refreshPricing(form, collected);
@@ -1816,7 +1725,10 @@ export async function advance(
         attachedFile = findNewlyAttachedFile(before, collected);
       }
       productCatalog = await loadProductCatalog(form, collected);
-      availableTimeslots = await loadTimeslots(form, collected);
+      ({ availableTimeslots, timeslotFallback } = await loadTimeslotContext(
+        form,
+        collected,
+      ));
 
       if (selectionChanged(before, collected)) {
         const refreshed = await refreshPricing(form, collected);
@@ -1953,10 +1865,12 @@ export async function advance(
             pricing = refreshed;
           }
         }
-      } else if (isConsentComponent(current)) {
-        const config = getConsentConfig(form, collected);
-        const parsed = parseConsentTextAnswer(userMessage, collected, config);
-        if (!parsed) {
+      } else if (
+        (accessor === "timeslots" || current.type === "timeSlots") &&
+        timeslotFallback
+      ) {
+        const dateValue = parseTimeslotDateAnswer(userMessage);
+        if (!dateValue) {
           return rejectValidation(
             state,
             form,
@@ -1964,31 +1878,17 @@ export async function advance(
             current,
             userMessage,
             undefined,
-            "Please accept the terms and conditions to continue.",
-            productCatalog,
-            availableTimeslots,
-          );
-        }
-        const validation = validateConsentAnswer(config, parsed, collected);
-        if (!validation.ok) {
-          return rejectValidation(
-            state,
-            form,
-            collected,
-            current,
-            userMessage,
-            undefined,
-            validation.message,
+            "Please pick a date using the calendar or enter YYYY-MM-DD.",
             productCatalog,
             availableTimeslots,
           );
         }
         const before = { ...collected };
-        collected = applyConsentAnswer(
+        collected = applyAnswer(
           form,
           collected,
-          parsed,
-          config,
+          current,
+          [dateValue],
           productCatalog,
         );
         if (selectionChanged(before, collected)) {
@@ -2001,7 +1901,37 @@ export async function advance(
       } else {
       let extracted: unknown;
 
-      if (accessor === "destinationCountry") {
+      if (accessor === "preferredNotary" || current.type === "preferredNotary") {
+        const optionList = getOptionsForComponent(
+          current,
+          form,
+          productCatalog,
+          availableTimeslots,
+          state.collected,
+          collected,
+        );
+        const trimmed = userMessage.trim();
+        if (!trimmed) {
+          extracted = PREFERRED_NOTARY_DEFAULT;
+        } else {
+          const resolved = resolveToOptionValue(trimmed, optionList ?? []);
+          if (resolved !== null) {
+            extracted = resolved;
+          } else {
+            return rejectValidation(
+              state,
+              form,
+              collected,
+              current,
+              userMessage,
+              undefined,
+              "Please pick a notary from the list or choose No preference.",
+              productCatalog,
+              availableTimeslots,
+            );
+          }
+        }
+      } else if (accessor === "destinationCountry") {
         const resolution = resolveDestinationCountryAnswer(userMessage, form);
         if (resolution.status === "resolved") {
           extracted = resolution.code;
@@ -2089,7 +2019,10 @@ export async function advance(
         attachedFile = findNewlyAttachedFile(before, collected);
       }
       productCatalog = await loadProductCatalog(form, collected);
-      availableTimeslots = await loadTimeslots(form, collected);
+      ({ availableTimeslots, timeslotFallback } = await loadTimeslotContext(
+        form,
+        collected,
+      ));
 
       if (selectionChanged(before, collected)) {
         const refreshed = await refreshPricing(form, collected);
@@ -2130,6 +2063,7 @@ export async function advance(
     pricing,
     productCatalog,
     availableTimeslots,
+    timeslotFallback,
     sessionFiles,
     sessionFileOwners,
   };
@@ -2205,13 +2139,13 @@ export async function advance(
     return { state: newState, step: participantsStep };
   }
 
-  if (shouldEmitConsentStep(next)) {
-    const consentStep = buildConsentStep(form, collected, pricing);
+  if (shouldEmitTimeslotDateStep(next, timeslotFallback)) {
+    const dateStep = buildDatePickerStep(pricing);
     newState.messages = [
       ...newState.messages,
-      { role: "assistant", content: consentStep.title },
+      { role: "assistant", content: dateStep.title },
     ];
-    return { state: newState, step: consentStep };
+    return { state: newState, step: dateStep };
   }
 
   const step = buildStepFromComponent(
@@ -2222,14 +2156,16 @@ export async function advance(
     productCatalog,
     availableTimeslots,
     pricing,
+    timeslotFallback,
   );
 
   const prompt =
     step.type === "ask" ||
     step.type === "fileUpload" ||
     step.type === "participants" ||
-    step.type === "consent"
-      ? step.type === "participants" || step.type === "consent"
+    step.type === "datePicker"
+      ? step.type === "participants" ||
+          step.type === "datePicker"
         ? step.title
         : step.question
       : "";
@@ -2314,17 +2250,23 @@ export async function applySurgicalEdit(
         ),
       };
     }
-    const availableTimeslots = await loadTimeslots(form, collected);
+    const reload = await loadTimeslotContext(form, collected);
     const options = getOptionsForComponent(
       component,
       form,
       productCatalog,
-      availableTimeslots,
+      reload.availableTimeslots,
       state.collected,
       collected,
     );
+    if (shouldEmitTimeslotDateStep(component, reload.timeslotFallback)) {
+      return {
+        state: { ...state, timeslotFallback: reload.timeslotFallback },
+        step: buildDatePickerStep(state.pricing, validation.message),
+      };
+    }
     return {
-      state,
+      state: { ...state, timeslotFallback: reload.timeslotFallback },
       step: {
         type: "ask",
         accessor,
@@ -2365,7 +2307,7 @@ export async function applySurgicalEdit(
   );
 
   productCatalog = await loadProductCatalog(form, collected);
-  const availableTimeslots = await loadTimeslots(form, collected);
+  const reload = await loadTimeslotContext(form, collected);
 
   let pricing = state.pricing;
   const refreshed = await refreshPricing(form, collected);
@@ -2380,7 +2322,8 @@ export async function applySurgicalEdit(
     messages: state.messages,
     pricing,
     productCatalog,
-    availableTimeslots,
+    availableTimeslots: reload.availableTimeslots,
+    timeslotFallback: reload.timeslotFallback,
     sessionFiles,
     sessionFileOwners,
   };
@@ -2421,10 +2364,10 @@ export async function applySurgicalEdit(
     };
   }
 
-  if (shouldEmitConsentStep(next)) {
+  if (shouldEmitTimeslotDateStep(next, reload.timeslotFallback)) {
     return {
       state: newState,
-      step: buildConsentStep(form, collected, pricing),
+      step: buildDatePickerStep(pricing),
     };
   }
 
@@ -2436,8 +2379,9 @@ export async function applySurgicalEdit(
       state.collected,
       collected,
       productCatalog,
-      availableTimeslots,
+      reload.availableTimeslots,
       pricing,
+      reload.timeslotFallback,
     ),
   };
 }

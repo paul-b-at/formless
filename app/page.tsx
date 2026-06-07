@@ -1,18 +1,26 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useState } from "react";
 
+import {
+  BookingProgress,
+  bookingProgressPercent,
+  type BookingProgressState,
+} from "@/components/BookingProgress";
 import { Chat, type CompleteBooking } from "@/components/Chat";
+import { FormlessLogo } from "@/components/FormlessLogo";
 import { Summary } from "@/components/Summary";
 import { Badge } from "@/components/ui/badge";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Progress } from "@/components/ui/progress";
+import { cn } from "@/lib/utils";
 import type { EngineState, EngineStep } from "@/lib/engine";
+import type { AppointmentRequest } from "@/lib/booking-schema";
+
+const INITIAL_PROGRESS: BookingProgressState = {
+  collected: {},
+  finished: false,
+  booked: false,
+};
 
 export default function Home() {
   const [booking, setBooking] = useState<CompleteBooking | null>(null);
@@ -20,73 +28,103 @@ export default function Home() {
     state: EngineState;
     step: EngineStep;
   } | null>(null);
+  const [progress, setProgress] = useState<BookingProgressState>(INITIAL_PROGRESS);
+
+  const showSummary = booking !== null;
+
+  const handleSessionProgress = useCallback(
+    (update: {
+      collected: Partial<AppointmentRequest>;
+      finished: boolean;
+    }) => {
+      setProgress((prev) => ({
+        ...prev,
+        collected: update.collected,
+        finished: update.finished,
+      }));
+    },
+    [],
+  );
+
+  const handleBooked = useCallback(() => {
+    setProgress((prev) => ({ ...prev, booked: true }));
+  }, []);
+
+  const handleBookingUpdate = useCallback((next: CompleteBooking | null) => {
+    setBooking(next);
+    if (!next) {
+      setProgress((prev) => ({ ...prev, booked: false, finished: false }));
+    }
+  }, []);
+
+  const progressValue = bookingProgressPercent(progress);
 
   return (
     <div className="flex h-dvh flex-col bg-background">
-      <header className="shrink-0 border-b border-border bg-card/50 px-4 py-4 backdrop-blur-sm sm:px-6">
-        <div className="mx-auto flex max-w-7xl items-center gap-3">
-          <div
-            aria-hidden
-            className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary text-lg text-primary-foreground"
-          >
-            ✦
+      <header className="shrink-0 bg-card">
+        <div
+          className={cn(
+            "mx-auto flex w-full flex-col motion-reduce:transition-none transition-[max-width] duration-300 ease-out",
+            showSummary ? "max-w-6xl" : "max-w-2xl",
+          )}
+        >
+          <div className="flex min-w-0 items-center justify-between gap-3 px-4 py-4 sm:px-6">
+            <FormlessLogo />
+            <Badge
+              variant="secondary"
+              className="hidden shrink-0 sm:inline-flex"
+            >
+              Notarity · START Vienna &apos;26
+            </Badge>
           </div>
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-2">
-              <h1 className="font-heading text-xl font-semibold tracking-tight text-foreground sm:text-2xl">
-                Formless
-              </h1>
-              <Badge variant="secondary" className="hidden sm:inline-flex">
-                Notarity · START Vienna &apos;26
-              </Badge>
+          <div className="px-4 sm:px-6">
+            <div className="flex min-h-14 flex-col gap-2 sm:flex-row sm:items-center sm:gap-4">
+              <BookingProgress state={progress} className="min-w-0 flex-1" compact />
+              <Progress
+                value={progressValue}
+                className="h-1.5 w-full shrink-0 sm:max-w-[8rem] motion-reduce:transition-none"
+                aria-label={`${progressValue}% complete`}
+              />
             </div>
-            <p className="truncate text-sm text-muted-foreground">
-              Book a notarisation in minutes — just answer a few questions.
-            </p>
+            <div
+              role="presentation"
+              className="border-b border-border"
+              aria-hidden
+            />
           </div>
         </div>
       </header>
 
-      <main className="mx-auto flex min-h-0 w-full max-w-7xl flex-1 flex-col gap-4 p-4 sm:p-6 lg:flex-row lg:gap-6">
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col lg:max-h-full lg:flex-[1.1]">
+      <main
+        className={cn(
+          "mx-auto grid min-h-0 w-full flex-1 grid-cols-1 gap-4 overflow-hidden p-4 pb-[max(1rem,env(safe-area-inset-bottom))] sm:p-6 motion-reduce:transition-none transition-[max-width,gap] duration-300 ease-out",
+          showSummary
+            ? "max-w-6xl lg:grid-cols-2 lg:items-stretch lg:gap-6 lg:overflow-hidden"
+            : "max-w-2xl",
+        )}
+      >
+        <div className="flex h-full min-h-0 min-w-0 flex-col">
           <Chat
-            onComplete={setBooking}
+            onComplete={handleBookingUpdate}
             resumeFrom={chatResume}
             onResumeHandled={() => setChatResume(null)}
+            onSessionProgress={handleSessionProgress}
           />
         </div>
 
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col lg:max-h-full">
-          {booking ? (
+        {showSummary && booking ? (
+          <div className="summary-enter flex h-full min-h-0 min-w-0 flex-col">
             <Summary
               booking={booking}
-              onBookingUpdate={setBooking}
+              onBookingUpdate={handleBookingUpdate}
               onReask={(resume) => {
-                setBooking(null);
+                handleBookingUpdate(null);
                 setChatResume(resume);
               }}
+              onBooked={handleBooked}
             />
-          ) : (
-            <Card className="flex h-full min-h-[12rem] flex-col border-dashed lg:min-h-0">
-              <CardHeader>
-                <CardTitle>Summary</CardTitle>
-                <CardDescription>
-                  Your price breakdown and booking review will appear here once
-                  the conversation is complete.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="flex flex-1 flex-col items-center justify-center gap-2 text-center text-muted-foreground">
-                <span className="text-3xl opacity-40" aria-hidden>
-                  📋
-                </span>
-                <p className="max-w-xs text-sm">
-                  Complete the chat on the left to see line items and submit in
-                  debug mode.
-                </p>
-              </CardContent>
-            </Card>
-          )}
-        </div>
+          </div>
+        ) : null}
       </main>
 
       <footer className="shrink-0 border-t border-border px-4 py-2 text-center text-xs text-muted-foreground">

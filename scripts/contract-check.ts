@@ -5,8 +5,7 @@
  * Run: bun run scripts/contract-check.ts
  */
 
-// Import from notarity-api (same implementation as lib/notarity.ts; server-only blocks Bun scripts)
-import { priceRequest, sumNetToEuros } from "../lib/notarity-api";
+import { priceRequest, sumNetToEuros } from "../lib/notarity";
 import type { AppointmentRequest } from "../lib/booking-schema";
 
 const joshuaPayload: AppointmentRequest = {
