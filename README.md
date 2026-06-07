@@ -4,6 +4,8 @@
 
 Built for **START Hack Vienna '26** (Notarity case).
 
+**Docs:** [Technical report](./REPORT.md) · [MCP tools](./mcp/README.md)
+
 ## What it does
 
 Formless is a conversational booking assistant that respects the **live** Notarity booking-form config (`start-vienna-hackathon` on staging):
