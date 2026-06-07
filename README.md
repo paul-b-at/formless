@@ -4,6 +4,8 @@ Conversational notary booking — upload a document, answer a few questions, get
 
 Built for **START Hack Vienna '26** (Notarity case). The live booking-form schema is the source of truth: conditional rules, product pickers, timeslots, and pricing all come from staging — nothing is hardcoded.
 
+**Live demo:** https://formless-jade.vercel.app/
+
 ## What it does
 
 1. Fetches the live form schema from Notarity staging.
@@ -104,7 +106,7 @@ Next.js 15 (Webpack). All API routes that handle uploads or multipart submit use
 | `OCR_MODELS` | No | e.g. `gemini-2.5-flash,gemini-2.0-flash` |
 | `OCR_MOCK` | No | **`1` recommended** for the live demo (see below) |
 
-4. Deploy. Smoke-test: open `/`, start chat, upload a demo PDF.
+4. Deploy. Smoke-test: open `/`, start chat, upload a demo PDF. Current deployment: https://formless-jade.vercel.app/
 
 **OCR for the live demo:** set **`OCR_MOCK=1`** on Vercel. OCR then serves committed `fixtures/ocr/*.json` (Joshua / Robert / Elizabeth personas) with zero Gemini OCR calls — reliable for judges and no quota surprises. The chat engine still needs `GEMINI_API_KEY`. For live multimodal OCR instead, set `OCR_MOCK=0` (or unset) and ensure `OCR_MODELS` + quota are healthy; live OCR writes a best-effort cache under `/tmp` on Vercel and never fails the request if the write fails.
 

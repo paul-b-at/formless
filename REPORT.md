@@ -210,5 +210,5 @@ Pre-saved OCR samples (used when `OCR_MOCK=1`): `fixtures/ocr/nie-application-de
 | Setup & run | [README.md](./README.md) |
 | MCP tools | [mcp/README.md](./mcp/README.md) |
 | Staging form (reference UI) | https://staging.notarity.com/#/book/start-vienna-hackathon/ |
-| Live demo | _TBD — add deployment URL_ |
+| Live demo | https://formless-jade.vercel.app/ |
 | Demo video | _TBD — add recording link_ |
