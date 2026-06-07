@@ -1,7 +1,8 @@
-.env.local
 .env
+.env.local
 node_modules
 .next
 .ocr-cache/
+.cursor/
 *.pdf
 .DS_Store
