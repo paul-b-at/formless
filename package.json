@@ -11,6 +11,8 @@
     "engine-replay-robert": "bun run scripts/engine-replay-robert.ts",
     "engine-replay-elizabeth": "bun run scripts/engine-replay-elizabeth.ts",
     "engine-replay-twosigner": "bun run scripts/engine-replay-twosigner.ts",
+    "mcp": "bun run mcp/server.ts",
+    "mcp-replay": "bun run mcp/replay.ts",
     "test": "bun test"
   },
   "dependencies": {

@@ -99,14 +99,14 @@ submit_booking({ sessionId, confirm: true })    # only after user confirms
 claude mcp add formless-notarity -- bun run mcp
 ```
 
-**Cursor** — set `cwd` to your clone:
+**Cursor** — use the **absolute path to `bun`** (Cursor’s GUI often lacks `~/.bun/bin` on `PATH`) and set `cwd` to your clone:
 
 ```json
 {
   "mcpServers": {
     "formless-notarity": {
-      "command": "bun",
-      "args": ["run", "mcp"],
+      "command": "/Users/you/.bun/bin/bun",
+      "args": ["run", "mcp/server.ts"],
       "cwd": "/path/to/formless"
     }
   }

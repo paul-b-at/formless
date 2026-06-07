@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -47,8 +48,10 @@ function textResult(text: string, structuredContent?: Record<string, unknown>) {
   };
 }
 
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+
 async function loadEnvLocal(): Promise<void> {
-  const envPath = join(process.cwd(), ".env.local");
+  const envPath = join(REPO_ROOT, ".env.local");
   try {
     const text = await readFile(envPath, "utf8");
     for (const line of text.split(/\r?\n/)) {
