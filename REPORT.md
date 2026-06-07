@@ -51,7 +51,7 @@ User uploads PDF (optional)          User answers chat / forms
          └──────────────┴──────────────┘
                         ▼
               EngineStep (ask | form | fileUpload |
-              participants | datePicker | complete)
+              participants | proofOfRepresentation | datePicker | complete)
                         │
                         ▼
               Summary.tsx — review + edit
@@ -76,7 +76,7 @@ Product pickers resolve against `GET /products/tags`; auto-add companion product
 `lib/engine.ts` implements `advance(state, userMessage)`:
 
 - Bootstraps defaults: `mode: "debug"`, `_appointmentRequestDraft`, `timezone: "Europe/Vienna"`, origin URL from the form's `_company`.
-- Emits typed **`EngineStep`** variants the UI renders directly: `ask` (with options), `form` (party fields), `fileUpload` (per-product), `participants`, `datePicker` (timeslot fallback), or `complete`.
+- Emits typed **`EngineStep`** variants the UI renders directly: `ask` (with options), `form` (party fields), `fileUpload` (per-product), `participants`, `proofOfRepresentation` (product toggle when multi-signer PoA), `datePicker` (timeslot fallback), or `complete`.
 - Uses **Gemini structured output** (`gemini-3.5-flash`) to extract free-text answers into schema values; party forms can bypass the LLM via structured JSON from the UI.
 - Refreshes price via `priceRequest` when the selection changes and attaches `lineItems` / `euroTotal` to steps for live breakdown display.
 
@@ -107,7 +107,8 @@ Product pickers resolve against `GET /products/tags`; auto-add companion product
 `components/Chat.tsx` drives the session:
 
 - Hero landing → document upload or text start.
-- Renders each `EngineStep` type: option chips, `CountrySearchSelect`, `ParticipantsForm`, `InlineFileUploadCard`, timeslot grid or date picker.
+- Renders each `EngineStep` type: option chips, `CountrySearchSelect`, `ParticipantsForm` (multi-signer with **Add another signer**), `InlineFileUploadCard`, timeslot grid or date picker.
+- Proof-of-representation quick replies appear after **two** participant emails on products with `showProofOfRepresentation`; single-signer flows skip straight to timeslots.
 - Party forms use **Geoapify** autocomplete (`GET /api/address` proxy) when `GEOAPIFY_API_KEY` is set; manual entry works without it.
 - On `complete`, hands off to `Summary.tsx` for price breakdown, inline edits (`ProductEditPanel`), and submit.
 
@@ -140,15 +141,16 @@ The question flow is **entirely config-driven**. Changing `destinationCountry` r
 
 ## Demo personas & verified results
 
-Headless replay scripts (`scripts/engine-replay*.ts`) exercise the engine without the UI, price against live staging at the end, and assert payload shape. Joshua and Robert also assert exact euro totals.
+Headless replay scripts (`scripts/engine-replay*.ts`) exercise the engine without the UI, price against live staging at the end, and assert payload shape. Joshua, Robert, and **Two-signer PoA** assert exact euro totals.
 
 | Persona | Document / flow | Key payload traits | Verified price |
 |---------|-----------------|-------------------|----------------|
 | **Joshua** | Spain NIE application + hard copy | `destinationCountry: "ES"`, NIE product + auto-added NIE Personal Data, apostille, two PDFs, separate shipping address | **€580** (`bun run contract-check`, `bun run engine-replay`) |
-| **Robert** | Lithuania Power of Attorney | `destinationCountry: "LT"`, Signature notarisation, private billing, no file upload, single participant | **€120** (`OCR_MOCK=1 bun run engine-replay-robert`) |
+| **Robert** | Lithuania PoA (single signer) | `destinationCountry: "LT"`, Signature notarisation, private billing, no file upload, one participant | **€120** (`OCR_MOCK=1 bun run engine-replay-robert`) |
+| **Two-signer PoA** | Lithuania PoA + attorney-in-fact | `destinationCountry: "LT"`, two participants (`client: true`), `proofOfRepresentation: true`, `hardCopy: { hardCopy: true, expressShipping: true }`, shipping address | **€250** (`OCR_MOCK=1 bun run engine-replay-twosigner`) |
 | **Elizabeth** | Austrian FlexCo incorporation | `destinationCountry: "AT"`, FlexCo product + articles PDF, **business billing** (`business: true`, company name), express shipping only | Priced live; replay asserts structure, not a fixed euro assertion (`OCR_MOCK=1 bun run engine-replay-elizabeth`) |
 
-Pre-saved OCR samples (used when `OCR_MOCK=1`): `fixtures/ocr/nie-application-demo-joshua_timms.json`, `Robert_Stevens_sample_case.json`, `elizabeth-flexco.json`.
+Pre-saved OCR samples (used when `OCR_MOCK=1`): `fixtures/ocr/nie-application-demo-joshua_timms.json`, `Robert_Stevens_sample_case.json`, `elizabeth-flexco.json`. The two-signer replay resolves the PoA product title from the OCR fixture against the **live** LT catalog — no hardcoded product ids in the engine.
 
 ---
 
@@ -180,7 +182,9 @@ Pre-saved OCR samples (used when `OCR_MOCK=1`): `fixtures/ocr/nie-application-de
 
 6. **Timeslot date fallback** — When the timeslot API returns nothing, a `YYYY-MM-DD` string in `timeslots[]` still prices and submits (contract-probed). Tradeoff: user picks a preferred date, not a concrete slot id.
 
-7. **Gemini for answer extraction** — Free-text chat maps to schema values via structured JSON. Tradeoff: requires `GEMINI_API_KEY`; party forms use structured UI to reduce parse failures.
+7. **Multi-signer PoA** — `ParticipantsForm` collects multiple signers; when `participants.length >= 2` on a product with `showProofOfRepresentation`, the engine asks for proof-of-representation before timeslots and writes `proofOfRepresentation: boolean` on the product row. Express hard-copy shipping is a first-class quick-reply option (`hardCopy` + `expressShipping`).
+
+8. **Gemini for answer extraction** — Free-text chat maps to schema values via structured JSON. Tradeoff: requires `GEMINI_API_KEY`; party forms use structured UI to reduce parse failures.
 
 ---
 
@@ -188,7 +192,7 @@ Pre-saved OCR samples (used when `OCR_MOCK=1`): `fixtures/ocr/nie-application-de
 
 - **MCP sessions** are in-memory — no persistence across process restarts.
 - **OCR product mapping** combines Gemini hints with regex→catalog title matching; ambiguous documents may need manual product selection.
-- **Robert replay** uses a single participant row even though the PoA document names an attorney-in-fact; multi-participant / `proofOfRepresentation` flows are supported by the engine but not fully exercised in that persona script.
+- **Proof-of-representation** is only prompted when two or more participants are finalized (or when the product marks it required); single-signer Robert-style flows skip it by design.
 - **Submit side effects** — even in `debug` mode, Notarity may send emails; the test draft id limits blast radius but does not eliminate it.
 - **Elizabeth** replay validates payload structure and live price but does not hardcode an expected euro total in the script.
 
@@ -197,9 +201,8 @@ Pre-saved OCR samples (used when `OCR_MOCK=1`): `fixtures/ocr/nie-application-de
 ## What we'd do next
 
 1. **Live OCR by default** with pre-saved sample fallback only on failure, plus more committed persona JSON files.
-2. **Multi-signer PoA** — exercise `participants` and `proofOfRepresentation` end-to-end in UI and replay for Robert-like cases.
-3. **Production hardening** — `mode: "live"`, draft-id removal, error telemetry, and persistent MCP session storage.
-4. **Config portability** — prove the interpreter against a second booking-form slug without code changes.
+2. **Production hardening** — `mode: "live"`, draft-id removal, error telemetry, and persistent MCP session storage.
+3. **Config portability** — prove the interpreter against a second booking-form slug without code changes.
 
 ---
 

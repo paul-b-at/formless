@@ -10,7 +10,7 @@ import "./globals.css";
 const geist = Geist({subsets:['latin'],variable:'--font-sans'});
 
 export const metadata: Metadata = {
-  title: "notarity — Notarity Booking Assistant",
+  title: "Formless — Notarity Booking Assistant",
   description:
     "Book a notary appointment in under 3 minutes with AI-guided chat and server-side pricing.",
 };

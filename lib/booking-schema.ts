@@ -26,7 +26,7 @@ export const ProductSelection = z.object({
   userInput: z.string().default(""),
   documentsNotReadyYet: z.boolean().default(false),
   needHelpDrafting: z.boolean().default(false),
-  proofOfRepresentation: z.string().nullable().default(null),
+  proofOfRepresentation: z.boolean().nullable().default(null),
   files: z.array(z.string()).default([]), // MUST match uploaded multipart filenames
 });
 

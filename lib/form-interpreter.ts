@@ -148,6 +148,9 @@ export type ProductDefinition = {
   showApostille?: boolean;
   fileUploadRequired?: boolean;
   showFileUpload?: boolean;
+  showProofOfRepresentation?: boolean;
+  proofOfRepresentationRequired?: boolean;
+  proofOfRepresentationCheckedByDefault?: boolean;
 };
 
 export type Collected = Partial<AppointmentRequest> & {
@@ -349,7 +352,7 @@ export function visibleComponents(
   return visible;
 }
 
-function getProductDef(
+export function getProductDef(
   id: string,
   catalog: ProductDefinition[],
 ): ProductDefinition | undefined {
@@ -749,7 +752,9 @@ function defaultProductSelection(
     userInput: "",
     documentsNotReadyYet: false,
     needHelpDrafting: false,
-    proofOfRepresentation: null,
+    proofOfRepresentation: def?.proofOfRepresentationCheckedByDefault
+      ? true
+      : null,
     files: [],
   };
 }

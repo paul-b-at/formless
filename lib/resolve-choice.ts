@@ -2,6 +2,7 @@ import "server-only";
 
 import type { EngineState } from "./engine";
 import { resolveToOptionValue } from "./answer-resolution";
+import { HARD_COPY_OPTIONS } from "./hard-copy-options";
 import {
   getCountryOptions,
   getVisibleProductPickerTags,
@@ -104,14 +105,7 @@ async function optionsForComponent(
   }
 
   if (accessor === "hardCopy") {
-    return [
-      { label: "Yes, send a hard copy", value: "Yes, send a hard copy" },
-      { label: "No hard copy needed", value: "No hard copy needed" },
-      {
-        label: "Express shipping only, no hard copy",
-        value: "Express shipping only, no hard copy",
-      },
-    ];
+    return HARD_COPY_OPTIONS.map((label) => ({ label, value: label }));
   }
 
   if (

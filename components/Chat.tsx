@@ -2368,10 +2368,10 @@ export function Chat({
                 .slice(0, 12)
                 .map((option) => {
                   const selected = selectedQuickReply === option.value;
-                  const countryCode = extractCountryCodeFromOption(
-                    option.value,
-                    option.label,
-                  );
+                  const countryCode =
+                    currentAccessor === "destinationCountry"
+                      ? extractCountryCodeFromOption(option.value, option.label)
+                      : null;
                   const flag = countryCode ? countryFlag(countryCode) : "";
                   return (
                     <Button

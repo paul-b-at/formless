@@ -39,7 +39,14 @@ import {
 } from "./gemini-metrics";
 import { GEMINI_MODEL } from "./gemini-model";
 import { mapDocumentHintToProduct } from "./ocr-product-map";
+import {
+  getPendingProofProduct,
+  parseProofOfRepresentationAnswer,
+  PROOF_OF_REPRESENTATION_ACCESSOR,
+  setProductProofOfRepresentation,
+} from "./product-proof";
 import { clearDependentsOf } from "./collected-edit";
+import { HARD_COPY_OPTIONS, parseHardCopyAnswer } from "./hard-copy-options";
 import { validateAnswer } from "./field-validation";
 import { sanitizeCollected } from "./party-sanitize";
 import {
@@ -121,6 +128,7 @@ export type EngineStep =
       accessor: string;
       question: string;
       options?: StepOption[];
+      productId?: string;
       lineItems?: PriceLineItem[];
       euroTotal?: number;
     }
@@ -307,6 +315,11 @@ async function loadProductCatalog(
     showApostille: Boolean(p.showApostille),
     fileUploadRequired: Boolean(p.fileUploadRequired),
     showFileUpload: Boolean(p.showFileUpload),
+    showProofOfRepresentation: Boolean(p.showProofOfRepresentation),
+    proofOfRepresentationRequired: Boolean(p.proofOfRepresentationRequired),
+    proofOfRepresentationCheckedByDefault: Boolean(
+      p.proofOfRepresentationCheckedByDefault,
+    ),
   }));
   const byId = new Map<string, ProductDefinition>();
   for (const p of [...fromTags, ...autoAdded]) {
@@ -529,19 +542,9 @@ function fallbackExtract(
       return [trimmed];
     }
     case "hardCopy": {
-      const lower = trimmed.toLowerCase();
-      if (/express shipping only/i.test(lower)) {
-        return { hardCopy: false, expressShipping: true };
-      }
-      if (
-        lower === "no hard copy needed" ||
-        /^(no|without)\b/.test(lower) ||
-        /\bnot needed\b/.test(lower)
-      ) {
-        return { hardCopy: false, expressShipping: false };
-      }
-      if (/yes|send a hard copy|true/i.test(trimmed)) {
-        return { hardCopy: true, expressShipping: false };
+      const parsed = parseHardCopyAnswer(trimmed);
+      if (parsed) {
+        return parsed;
       }
       return { hardCopy: false, expressShipping: false };
     }
@@ -1029,6 +1032,24 @@ export function buildParticipantsStep(
   };
 }
 
+function buildProofOfRepresentationStep(
+  pending: NonNullable<ReturnType<typeof getPendingProofProduct>>,
+  pricing?: PricingSlice,
+): Extract<EngineStep, { type: "ask" }> {
+  return {
+    type: "ask",
+    accessor: PROOF_OF_REPRESENTATION_ACCESSOR,
+    productId: pending.product.id,
+    question: `Does ${pending.label} require proof of representation (e.g. an attorney-in-fact signing on someone's behalf)?`,
+    options: [
+      asOption("Yes, include proof of representation", "yes"),
+      asOption("No proof of representation needed", "no"),
+    ],
+    lineItems: pricing?.lineItems,
+    euroTotal: pricing?.euroTotal,
+  };
+}
+
 function buildFormStep(
   component: Component,
   collected: Collected,
@@ -1085,11 +1106,7 @@ function getOptionsForComponent(
     case "timeSlots":
       return buildTimeslotOptions(slots);
     case "hardCopy":
-      return [
-        asOption("Yes, send a hard copy"),
-        asOption("No hard copy needed"),
-        asOption("Express shipping only, no hard copy"),
-      ];
+      return HARD_COPY_OPTIONS.map((label) => asOption(label));
     case "preferredNotary": {
       const config = getPreferredNotaryConfig(form, collected, catalog);
       const options: StepOption[] = [];
@@ -1204,6 +1221,18 @@ function tryBuildFileUploadStep(
   };
 }
 
+function tryBuildProofOfRepresentationStep(
+  collected: Collected,
+  catalog: ProductDefinition[],
+  pricing?: PricingSlice,
+): Extract<EngineStep, { type: "ask" }> | null {
+  const pending = getPendingProofProduct(collected, catalog);
+  if (!pending) {
+    return null;
+  }
+  return buildProofOfRepresentationStep(pending, pricing);
+}
+
 function buildStepFromComponent(
   component: Component,
   form: BookingFormSchema,
@@ -1214,6 +1243,11 @@ function buildStepFromComponent(
   pricing?: PricingSlice,
   timeslotFallback = false,
 ): EngineStep {
+  const proofStep = tryBuildProofOfRepresentationStep(collected, catalog, pricing);
+  if (proofStep) {
+    return proofStep;
+  }
+
   const fileUpload = tryBuildFileUploadStep(component, collected, catalog, pricing);
   if (fileUpload) {
     return fileUpload;
@@ -1479,12 +1513,66 @@ export async function advance(
     sessionFileOwners,
   );
 
+  let attachedFile: string | undefined;
+  let handledProofAnswer = false;
+  const pendingProofAtStart = getPendingProofProduct(collected, productCatalog);
+
+  if (pendingProofAtStart && userMessage.trim() && !structuredAnswer) {
+    const parsed = parseProofOfRepresentationAnswer(userMessage);
+    if (parsed === undefined) {
+      const turnMessages: { role: "user" | "assistant"; content: string }[] = [
+        { role: "user", content: userMessage },
+        {
+          role: "assistant",
+          content:
+            "Please choose yes or no — does this document need proof of representation?",
+        },
+      ];
+      const proofStep = buildProofOfRepresentationStep(
+        pendingProofAtStart,
+        pricing,
+      );
+      return {
+        state: {
+          form,
+          collected,
+          messages: [...state.messages, ...turnMessages],
+          pricing,
+          productCatalog,
+          availableTimeslots,
+          timeslotFallback,
+          sessionFiles,
+          sessionFileOwners,
+        },
+        step: {
+          ...proofStep,
+          question:
+            "Please choose yes or no — does this document need proof of representation?",
+        },
+      };
+    }
+
+    const before = { ...collected };
+    collected = setProductProofOfRepresentation(
+      collected,
+      pendingProofAtStart.product.id,
+      parsed,
+    );
+    if (selectionChanged(before, collected)) {
+      const refreshed = await refreshPricing(form, collected);
+      if (refreshed) {
+        collected = { ...collected, confirmedPrice: refreshed.euroTotal };
+        pricing = refreshed;
+      }
+    }
+    handledProofAnswer = true;
+  }
+
   const current =
     pendingPreferredNotaryComponent(form, collected, productCatalog) ??
     nextUnfilled(form, collected, productCatalog);
-  let attachedFile: string | undefined;
 
-  if (structuredAnswer && current) {
+  if (!handledProofAnswer && structuredAnswer && current) {
     const accessor = current.accessor ?? current.type;
 
     if (
@@ -1620,7 +1708,7 @@ export async function advance(
       }
     }
     }
-  } else if (userMessage.trim()) {
+  } else if (!handledProofAnswer && userMessage.trim()) {
     const fileName = userMessage.trim();
     const productsComponent = findComponentByAccessor(form, "products");
     const explicitFile = isExplicitFileUploadAnswer(
@@ -1931,6 +2019,32 @@ export async function advance(
             );
           }
         }
+      } else if (accessor === "hardCopy" || current.type === "hardCopy") {
+        const optionList = getOptionsForComponent(
+          current,
+          form,
+          productCatalog,
+          availableTimeslots,
+          state.collected,
+          collected,
+        );
+        const trimmed = userMessage.trim();
+        const resolved = resolveToOptionValue(trimmed, optionList ?? []);
+        const parsed = parseHardCopyAnswer(resolved ?? trimmed);
+        if (!parsed) {
+          return rejectValidation(
+            state,
+            form,
+            collected,
+            current,
+            userMessage,
+            undefined,
+            "Please choose a hard-copy shipping option from the list.",
+            productCatalog,
+            availableTimeslots,
+          );
+        }
+        extracted = parsed;
       } else if (accessor === "destinationCountry") {
         const resolution = resolveDestinationCountryAnswer(userMessage, form);
         if (resolution.status === "resolved") {
@@ -2080,6 +2194,16 @@ export async function advance(
       { role: "assistant", content: preferredNotaryStep.question },
     ];
     return { state: newState, step: preferredNotaryStep };
+  }
+
+  const pendingProof = getPendingProofProduct(collected, productCatalog);
+  if (pendingProof) {
+    const proofStep = buildProofOfRepresentationStep(pendingProof, pricing);
+    newState.messages = [
+      ...newState.messages,
+      { role: "assistant", content: proofStep.question },
+    ];
+    return { state: newState, step: proofStep };
   }
 
   if (!next) {

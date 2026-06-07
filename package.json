@@ -10,6 +10,7 @@
     "engine-replay": "bun run scripts/engine-replay.ts",
     "engine-replay-robert": "bun run scripts/engine-replay-robert.ts",
     "engine-replay-elizabeth": "bun run scripts/engine-replay-elizabeth.ts",
+    "engine-replay-twosigner": "bun run scripts/engine-replay-twosigner.ts",
     "test": "bun test"
   },
   "dependencies": {

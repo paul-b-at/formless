@@ -48,7 +48,8 @@ Copy [`.env.example`](.env.example) → `.env.local`. Names only in the repo —
 bun test
 bun run contract-check                          # POST /price only → expect €580
 bun run engine-replay                           # Joshua / Spain → €580
-OCR_MOCK=1 bun run engine-replay-robert         # Lithuania PoA → €120
+OCR_MOCK=1 bun run engine-replay-robert         # Lithuania PoA, single signer → €120
+OCR_MOCK=1 bun run engine-replay-twosigner      # LT PoA, two signers + express hard copy → €250
 OCR_MOCK=1 bun run engine-replay-elizabeth      # Austrian FlexCo (structure + live price)
 ```
 
@@ -75,7 +76,7 @@ mcp/server.ts             — same engine over MCP stdio (see mcp/README.md)
 |------|--------|-------|
 | **Staging API** | ✅ Live | Schema, products, timeslots, price, submit — all hit `staging-api.notarity.com` |
 | **Submit mode** | ✅ Debug | `mode: "debug"` + test draft id; submit may still send emails |
-| **Chat engine** | ✅ Working | Schema-driven steps, Gemini extraction, live price refresh |
+| **Chat engine** | ✅ Working | Schema-driven steps, Gemini extraction, live price refresh, multi-signer participants + proof-of-representation |
 | **OCR (live)** | ✅ Working | Gemini multimodal via `POST /api/ocr`; best-effort cache under `.ocr-cache/` (gitignored) or `/tmp` on Vercel |
 | **OCR (fixtures)** | 🔶 Optional | `OCR_MOCK=1` serves committed `fixtures/ocr/*.json` — recommended for reliable demos |
 | **Timeslots** | ✅ Live fetch | Real slot ids from API; if fetch fails or returns empty, **`datePicker`** collects `YYYY-MM-DD` (prices and submits) |
@@ -85,13 +86,16 @@ mcp/server.ts             — same engine over MCP stdio (see mcp/README.md)
 
 ## Demo personas
 
-Headless replay scripts exercise the engine against live staging and assert payload shape. Joshua and Robert also assert exact euro totals.
+Headless replay scripts exercise the engine against live staging and assert payload shape. Joshua, Robert, and **Two-signer PoA** assert exact euro totals.
 
 | Persona | Flow | Key traits | Verified price |
 |---------|------|------------|----------------|
 | **Joshua** | Spain NIE application + hard copy | `destinationCountry: "ES"`, NIE + auto-added NIE Personal Data, apostille, two PDFs | **€580** (`bun run engine-replay`) |
-| **Robert** | Lithuania Power of Attorney | `destinationCountry: "LT"`, Signature notarisation, private billing | **€120** (`OCR_MOCK=1 bun run engine-replay-robert`) |
+| **Robert** | Lithuania PoA (single signer) | `destinationCountry: "LT"`, Signature notarisation, private billing, no hard copy | **€120** (`OCR_MOCK=1 bun run engine-replay-robert`) |
+| **Two-signer PoA** | Lithuania PoA + attorney-in-fact | Two participants, `proofOfRepresentation: true`, express hard-copy shipping | **€250** (`OCR_MOCK=1 bun run engine-replay-twosigner`) |
 | **Elizabeth** | Austrian FlexCo incorporation | `destinationCountry: "AT"`, FlexCo + articles PDF, **business billing** | Live price; replay asserts structure (`OCR_MOCK=1 bun run engine-replay-elizabeth`) |
+
+In the **chat UI**, the proof-of-representation step appears only after **two participant emails** are submitted on a product with `showProofOfRepresentation` (e.g. Signature notarisation). Use **Add another signer** on the participants form — a single signer skips that question (Robert path).
 
 OCR fixtures: `fixtures/ocr/nie-application-demo-joshua_timms.json`, `Robert_Stevens_sample_case.json`, `elizabeth-flexco.json`.
 

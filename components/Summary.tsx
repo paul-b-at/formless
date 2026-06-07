@@ -585,7 +585,26 @@ export function Summary({
           <Button
             type="button"
             size="sm"
-            variant={payload.hardCopy.hardCopy ? "default" : "outline"}
+            variant={
+              payload.hardCopy.hardCopy && payload.hardCopy.expressShipping
+                ? "default"
+                : "outline"
+            }
+            disabled={editLoading}
+            onClick={() =>
+              void applyEdit(accessor, { hardCopy: true, expressShipping: true })
+            }
+          >
+            Hard copy + express shipping
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant={
+              payload.hardCopy.hardCopy && !payload.hardCopy.expressShipping
+                ? "default"
+                : "outline"
+            }
             disabled={editLoading}
             onClick={() =>
               void applyEdit(accessor, { hardCopy: true, expressShipping: false })
