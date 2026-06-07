@@ -619,7 +619,17 @@ function isPartyFilled(party: unknown): boolean {
     }
   }
 
-  return true;
+  const addressFilled =
+    typeof p.address === "string" &&
+    p.address.trim().length > 0 &&
+    typeof p.zipCode === "string" &&
+    p.zipCode.trim().length > 0 &&
+    typeof p.city === "string" &&
+    p.city.trim().length > 0 &&
+    typeof p.countryCode === "string" &&
+    p.countryCode.trim().length === 2;
+
+  return addressFilled;
 }
 
 function isProductsFilled(

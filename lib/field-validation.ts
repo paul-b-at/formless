@@ -159,6 +159,34 @@ export function validateAnswer(
       };
     }
 
+    const address =
+      typeof party.address === "string" ? party.address.trim() : "";
+    if (!address) {
+      return { ok: false, message: "Address is required." };
+    }
+
+    const zipCode =
+      typeof party.zipCode === "string" ? party.zipCode.trim() : "";
+    if (!zipCode) {
+      return { ok: false, message: "ZIP / postal code is required." };
+    }
+
+    const city = typeof party.city === "string" ? party.city.trim() : "";
+    if (!city) {
+      return { ok: false, message: "City is required." };
+    }
+
+    const countryCode =
+      typeof party.countryCode === "string"
+        ? party.countryCode.trim().toUpperCase()
+        : "";
+    if (countryCode.length !== 2) {
+      return {
+        ok: false,
+        message: "Country code must be a 2-letter ISO code (e.g. ES).",
+      };
+    }
+
     const business =
       party.business === true ||
       party.business === "true" ||
@@ -189,6 +217,10 @@ export const PARTY_FORM_FIELD_ERRORS = {
   phoneNumber: "Phone number is required",
   firstName: "First name is required",
   lastName: "Last name is required",
+  address: "Address is required",
+  zipCode: "ZIP / postal code is required",
+  city: "City is required",
+  countryCode: "Country code is required",
 } as const;
 
 export function validatePartyFormValues(
@@ -215,6 +247,10 @@ export function validatePartyFormValues(
 
     if (field.name === "phoneNumber" && !isValidPhone(raw)) {
       errors[field.name] = PARTY_FORM_FIELD_ERRORS.phoneNumber;
+    }
+
+    if (field.name === "countryCode" && trimmed && trimmed.length !== 2) {
+      errors[field.name] = "Country code must be a 2-letter ISO code (e.g. ES)";
     }
   }
 

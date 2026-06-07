@@ -19,6 +19,7 @@ import {
   resolveDestinationCountryInput,
   isUploadFileName,
   nextUnfilled,
+  getAccessor,
   parseBookingForm,
   productDisplayName,
   resolveFileUploadProductId,
@@ -428,7 +429,7 @@ function findComponentByAccessor(
       }
 
       const componentAccessor =
-        component.accessor ??
+        getAccessor(component) ??
         (component.type === "timeSlots"
           ? "timeslots"
           : component.type === "countryPicker"
@@ -815,11 +816,16 @@ export const PARTY_FORM_FIELDS: FormField[] = [
   { name: "lastName", label: "Last name", type: "text", required: true },
   { name: "email", label: "Email", type: "email", required: true },
   { name: "phoneNumber", label: "Phone", type: "tel", required: true },
-  { name: "address", label: "Address", type: "text" },
-  { name: "zipCode", label: "ZIP / Postal code", type: "text" },
-  { name: "city", label: "City", type: "text" },
+  { name: "address", label: "Address", type: "text", required: true },
+  { name: "zipCode", label: "ZIP / Postal code", type: "text", required: true },
+  { name: "city", label: "City", type: "text", required: true },
   { name: "stateProvince", label: "State / Province", type: "text" },
-  { name: "countryCode", label: "Country code (ISO-2)", type: "text" },
+  {
+    name: "countryCode",
+    label: "Country code (ISO-2)",
+    type: "text",
+    required: true,
+  },
 ];
 
 const BUSINESS_BILLING_HINT =

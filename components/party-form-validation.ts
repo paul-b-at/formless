@@ -11,6 +11,10 @@ export const PARTY_FIELD_ERRORS = {
   firstName: "First name is required",
   lastName: "Last name is required",
   companyName: "Company name is required",
+  address: "Address is required",
+  zipCode: "ZIP / postal code is required",
+  city: "City is required",
+  countryCode: "Country code is required",
 } as const;
 
 export function isBusinessBillingSelected(
@@ -87,6 +91,12 @@ export function validatePartyFormFields(
       if (!isValidPartyPhone(raw)) {
         errors[field.name] = PARTY_FIELD_ERRORS.phoneNumber;
       }
+      continue;
+    }
+
+    if (field.name === "countryCode" && trimmed && trimmed.length !== 2) {
+      errors[field.name] =
+        "Country code must be a 2-letter ISO code (e.g. ES)";
     }
   }
 
