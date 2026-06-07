@@ -64,9 +64,7 @@ const answerQueues: Record<string, ScriptedAnswer[]> = {
   timeslots: [],
   billingDetails: [{ kind: "form", value: ELIZABETH_BILLING }],
   contactDetails: [{ kind: "text", value: "Same as billing" }],
-  hardCopy: [
-    { kind: "text", value: "Express shipping only, no hard copy" },
-  ],
+  hardCopy: [{ kind: "text", value: "No hard copy needed" }],
 };
 
 function tomorrowIsoDate(): string {
@@ -245,9 +243,9 @@ function assertElizabethPayload(payload: AppointmentRequest): void {
     throw new Error(`Expected preferredNotary empty, got ${parsed.preferredNotary}`);
   }
 
-  if (parsed.hardCopy.hardCopy !== false || parsed.hardCopy.expressShipping !== true) {
+  if (parsed.hardCopy.hardCopy !== false || parsed.hardCopy.expressShipping !== false) {
     throw new Error(
-      `Expected hardCopy false + expressShipping true, got ${JSON.stringify(parsed.hardCopy)}`,
+      `Expected no hard copy, got ${JSON.stringify(parsed.hardCopy)}`,
     );
   }
 

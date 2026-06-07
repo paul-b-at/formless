@@ -16,17 +16,17 @@ describe("hard-copy-options", () => {
     });
   });
 
-  test("parses express only", () => {
-    expect(parseHardCopyAnswer("Express shipping only, no hard copy")).toEqual({
-      hardCopy: false,
-      expressShipping: true,
-    });
-  });
-
   test("parses no hard copy", () => {
     expect(parseHardCopyAnswer("No hard copy needed")).toEqual({
       hardCopy: false,
       expressShipping: false,
+    });
+  });
+
+  test("legacy express-only phrase still parses if typed", () => {
+    expect(parseHardCopyAnswer("Express shipping only, no hard copy")).toEqual({
+      hardCopy: false,
+      expressShipping: true,
     });
   });
 });

@@ -7,7 +7,6 @@ export const HARD_COPY_OPTIONS = [
   "Yes, send a hard copy with express shipping",
   "Yes, send a hard copy",
   "No hard copy needed",
-  "Express shipping only, no hard copy",
 ] as const;
 
 export function parseHardCopyAnswer(message: string): HardCopySelection | undefined {

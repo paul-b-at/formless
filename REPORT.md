@@ -148,7 +148,7 @@ Headless replay scripts (`scripts/engine-replay*.ts`) exercise the engine withou
 | **Joshua** | Spain NIE application + hard copy | `destinationCountry: "ES"`, NIE product + auto-added NIE Personal Data, apostille, two PDFs, separate shipping address | **€580** (`bun run contract-check`, `bun run engine-replay`) |
 | **Robert** | Lithuania PoA (single signer) | `destinationCountry: "LT"`, Signature notarisation, private billing, no file upload, one participant | **€120** (`OCR_MOCK=1 bun run engine-replay-robert`) |
 | **Two-signer PoA** | Lithuania PoA + attorney-in-fact | `destinationCountry: "LT"`, two participants (`client: true`), `proofOfRepresentation: true`, `hardCopy: { hardCopy: true, expressShipping: true }`, shipping address | **€250** (`OCR_MOCK=1 bun run engine-replay-twosigner`) |
-| **Elizabeth** | Austrian FlexCo incorporation | `destinationCountry: "AT"`, FlexCo product + articles PDF, **business billing** (`business: true`, company name), express shipping only | Priced live; replay asserts structure, not a fixed euro assertion (`OCR_MOCK=1 bun run engine-replay-elizabeth`) |
+| **Elizabeth** | Austrian FlexCo incorporation | `destinationCountry: "AT"`, FlexCo product + articles PDF, **business billing** (`business: true`, company name), no hard copy | Priced live; replay asserts structure, not a fixed euro assertion (`OCR_MOCK=1 bun run engine-replay-elizabeth`) |
 
 Pre-saved OCR samples (used when `OCR_MOCK=1`): `fixtures/ocr/nie-application-demo-joshua_timms.json`, `Robert_Stevens_sample_case.json`, `elizabeth-flexco.json`. The two-signer replay resolves the PoA product title from the OCR fixture against the **live** LT catalog — no hardcoded product ids in the engine.
 
